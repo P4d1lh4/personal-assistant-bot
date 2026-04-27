@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -5,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 
 from .config import GEMINI_API_KEY, GEMINI_MODEL
 from .memory import get_memory_summary, get_recent_history
@@ -19,9 +21,22 @@ VALID_INTENTS = {
     "save_memory",
     "list_memories",
     "list_reminders",
+    "search_memories",
     "cancel_reminder",
     "delete_memory",
 }
+
+_RETRY_DELAY_RE = re.compile(r"retry in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+
+
+def _parse_retry_delay(err: Exception) -> int | None:
+    match = _RETRY_DELAY_RE.search(str(err))
+    if match:
+        try:
+            return int(float(match.group(1)))
+        except ValueError:
+            return None
+    return None
 
 VALID_CATEGORIES = {"fact", "preference", "routine", "goal", "habit"}
 
@@ -55,10 +70,14 @@ Sua tarefa é decidir o que fazer com a mensagem do Guilherme e responder em JSO
    Exemplos: "quais lembretes tenho?", "minha agenda", "o que tô agendado?".
    Campos: reply (curta — a agenda será adicionada automaticamente).
 
-7. "cancel_reminder" — quando ele pede pra cancelar um lembrete específico.
+7. "search_memories" — quando ele pergunta sobre algo específico que pode estar nas memórias salvas.
+   Exemplos: "o que sabe sobre o João?", "achou algo sobre café?", "busca aí qualquer coisa de trabalho".
+   Campos: query (palavra-chave curta para buscar — extraia o termo principal da pergunta), reply (curta, tipo "Procurando..." — os resultados serão adicionados automaticamente).
+
+8. "cancel_reminder" — quando ele pede pra cancelar um lembrete específico.
    Campos: id (número), reply.
 
-8. "delete_memory" — quando ele pede pra esquecer/apagar uma memória específica.
+9. "delete_memory" — quando ele pede pra esquecer/apagar uma memória específica.
    Campos: id (número), reply.
 
 CAMPO EXTRA (em qualquer intent, exceto save_memory): "extracted_facts"
@@ -136,6 +155,12 @@ def _coerce(parsed: dict, user_message: str) -> dict:
         cat = (parsed.get("category") or "").strip().lower()
         result["category"] = cat if cat in VALID_CATEGORIES else None
 
+    if intent == "search_memories":
+        result["query"] = (parsed.get("query") or "").strip()
+        if not result["query"]:
+            result["intent"] = "chat"
+            result["reply"] = reply or "O que você quer que eu busque?"
+
     if intent in {"cancel_reminder", "delete_memory"}:
         try:
             result["id"] = int(parsed.get("id"))
@@ -188,6 +213,15 @@ async def classify_and_respond(user_message: str) -> dict:
     try:
         response = await model.generate_content_async(prompt)
         raw = response.text or ""
+    except ResourceExhausted as e:
+        retry = _parse_retry_delay(e)
+        retry_msg = f" Tenta de novo em ~{retry}s." if retry else " Tenta de novo daqui a pouco."
+        log.warning("Gemini quota exceeded (retry=%ss)", retry)
+        return {
+            "intent": "chat",
+            "reply": f"Atingi o limite de uso da API do Gemini agora.{retry_msg}",
+            "extracted_facts": [],
+        }
     except Exception as e:
         log.exception("Erro ao chamar Gemini para classificação")
         return _fallback(user_message, f"api_error: {e}")
@@ -206,3 +240,31 @@ async def classify_and_respond(user_message: str) -> dict:
         return _fallback(user_message, "not_a_dict")
 
     return _coerce(parsed, user_message)
+
+
+_TRANSCRIPTION_PROMPT = (
+    "Transcreva o áudio em português brasileiro. "
+    "Responda APENAS com o texto transcrito, sem comentários, sem prefixos."
+)
+
+
+async def transcribe_voice(file_path: str, mime_type: str = "audio/ogg") -> str:
+    """Transcreve um arquivo de áudio usando Gemini.
+
+    Levanta ResourceExhausted, RuntimeError ou outras exceções em falha.
+    """
+    uploaded = await asyncio.to_thread(
+        genai.upload_file, file_path, mime_type=mime_type
+    )
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = await model.generate_content_async([_TRANSCRIPTION_PROMPT, uploaded])
+        text = (response.text or "").strip()
+        if not text:
+            raise RuntimeError("transcrição vazia")
+        return text
+    finally:
+        try:
+            await asyncio.to_thread(genai.delete_file, uploaded.name)
+        except Exception:
+            log.warning("Falha ao remover arquivo de upload %s", uploaded.name)

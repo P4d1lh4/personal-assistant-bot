@@ -1,19 +1,24 @@
 import logging
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
-from telegram import Update
+from telegram import Message, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from .. import reminders as reminders_service
-from ..intent import classify_and_respond
+from ..intent import classify_and_respond, transcribe_voice
 from ..memory import (
     add_memory,
     append_message,
     delete_memory,
     list_memories,
+    search_memories,
 )
 from .auth import owner_only
+
+MAX_VOICE_DURATION_S = 60
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +98,17 @@ async def _dispatch(intent_data: dict) -> str:
         prefix = (reply + "\n\n") if reply else ""
         return prefix + listing
 
+    if intent == "search_memories":
+        query = intent_data.get("query", "").strip()
+        if not query:
+            return reply or "O que você quer que eu busque?"
+        rows = search_memories(query)
+        if not rows:
+            return f"Não achei nada sobre \"{query}\" nas memórias."
+        listing = _format_memories(rows)
+        prefix = (reply + "\n\n") if reply else f"Achei {len(rows)} sobre \"{query}\":\n\n"
+        return prefix + listing
+
     if intent == "list_reminders":
         rows = reminders_service.list_active()
         listing = _format_reminders(rows)
@@ -120,20 +136,7 @@ async def _dispatch(intent_data: dict) -> str:
     return reply or "(sem resposta)"
 
 
-@owner_only
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if message is None or not message.text:
-        return
-
-    user_text = message.text.strip()
-    if not user_text:
-        return
-
-    await context.bot.send_chat_action(
-        chat_id=message.chat_id, action=ChatAction.TYPING
-    )
-
+async def _run_intent_pipeline(message: Message, user_text: str) -> None:
     append_message("user", user_text)
 
     try:
@@ -153,3 +156,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             add_memory(fact["category"], fact["content"], source="auto")
         except Exception:
             log.exception("Falha ao salvar fato extraído: %r", fact)
+
+
+@owner_only
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None or not message.text:
+        return
+
+    user_text = message.text.strip()
+    if not user_text:
+        return
+
+    await context.bot.send_chat_action(
+        chat_id=message.chat_id, action=ChatAction.TYPING
+    )
+    await _run_intent_pipeline(message, user_text)
+
+
+@owner_only
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None or message.voice is None:
+        return
+
+    voice = message.voice
+    if voice.duration and voice.duration > MAX_VOICE_DURATION_S:
+        await message.reply_text(
+            f"Áudio muito longo ({voice.duration}s). Limite de {MAX_VOICE_DURATION_S}s — "
+            "tenta uma mensagem mais curta."
+        )
+        return
+
+    await context.bot.send_chat_action(
+        chat_id=message.chat_id, action=ChatAction.TYPING
+    )
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".oga", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        tg_file = await context.bot.get_file(voice.file_id)
+        await tg_file.download_to_drive(custom_path=str(tmp_path))
+
+        try:
+            transcription = await transcribe_voice(
+                str(tmp_path), mime_type=voice.mime_type or "audio/ogg"
+            )
+        except Exception as e:
+            log.exception("Falha ao transcrever áudio")
+            await message.reply_text(f"Não consegui transcrever o áudio: {e}")
+            return
+
+        # Mostra a transcrição pro usuário antes de processar — útil pra debug
+        # e pra ele confirmar que entendeu o que falou.
+        await message.reply_text(f"🎙️ \"{transcription}\"")
+        await _run_intent_pipeline(message, transcription)
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                log.warning("Falha ao remover %s", tmp_path)

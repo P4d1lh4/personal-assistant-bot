@@ -23,3 +23,17 @@ OWNER_CHAT_ID = int(_required("OWNER_CHAT_ID"))
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
 DB_PATH = Path(os.getenv("DB_PATH", str(PROJECT_ROOT / "bot.db")))
+
+
+def _int_env(name: str, default: int, low: int, high: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if low <= value <= high else default
+
+
+DAILY_DIGEST_HOUR = _int_env("DAILY_DIGEST_HOUR", 7, 0, 23)

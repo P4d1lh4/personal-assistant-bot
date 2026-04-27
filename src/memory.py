@@ -7,12 +7,37 @@ VALID_CATEGORIES = {"fact", "preference", "routine", "goal", "habit"}
 
 def add_memory(category: str, content: str, source: str = "manual") -> int:
     category = category if category in VALID_CATEGORIES else "fact"
+    content = content.strip()
     with conn_ctx() as conn:
+        existing = conn.execute(
+            "SELECT id FROM memories "
+            "WHERE category = ? AND LOWER(content) = LOWER(?) "
+            "LIMIT 1",
+            (category, content),
+        ).fetchone()
+        if existing:
+            return existing["id"]
+
         cur = conn.execute(
             "INSERT INTO memories (category, content, source) VALUES (?, ?, ?)",
-            (category, content.strip(), source),
+            (category, content, source),
         )
         return cur.lastrowid
+
+
+def search_memories(query: str, limit: int = 50) -> list[dict]:
+    query = query.strip()
+    if not query:
+        return []
+    pattern = f"%{query}%"
+    with conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT id, category, content, source, created_at FROM memories "
+            "WHERE LOWER(content) LIKE LOWER(?) "
+            "ORDER BY created_at DESC LIMIT ?",
+            (pattern, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def list_memories(category: Optional[str] = None, limit: int = 100) -> list[dict]:
