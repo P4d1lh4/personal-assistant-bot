@@ -2,6 +2,7 @@ import logging
 
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -18,8 +19,13 @@ from .handlers.commands import (
     cmd_rotina,
     cmd_start,
 )
+from .handlers.medications import handle_medication_callback
 from .handlers.reminders import cmd_agenda, cmd_cancelar, cmd_lembrete
-from .scheduler import init_scheduler, load_reminders_from_db
+from .scheduler import (
+    init_scheduler,
+    load_medications_from_db,
+    load_reminders_from_db,
+)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -35,6 +41,7 @@ log = logging.getLogger(__name__)
 async def _post_init(app: Application) -> None:
     init_scheduler(app)
     load_reminders_from_db()
+    load_medications_from_db()
     log.info("Bot pronto. Aguardando mensagens.")
 
 
@@ -61,6 +68,10 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    app.add_handler(
+        CallbackQueryHandler(handle_medication_callback, pattern=r"^med_(taken|skip):")
+    )
 
     return app
 

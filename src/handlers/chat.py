@@ -7,6 +7,7 @@ from telegram import Message, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
+from .. import medications as medications_service
 from .. import reminders as reminders_service
 from .. import workouts as workouts_service
 from ..intent import classify_and_respond, transcribe_voice
@@ -16,6 +17,10 @@ from ..memory import (
     delete_memory,
     list_memories,
     search_memories,
+)
+from ..scheduler import (
+    add_medication_job,
+    remove_medication_job,
 )
 from .auth import owner_only
 
@@ -157,6 +162,122 @@ _WORKOUT_INTENTS = {
     "show_exercise_history",
     "start_rest_timer",
 }
+
+_MEDICATION_INTENTS = {
+    "create_medication",
+    "list_medications",
+    "delete_medication",
+    "track_medication",
+    "untrack_medication",
+    "medication_compliance",
+}
+
+
+def _resolve_medication(name: str | None) -> tuple[dict | None, str | None]:
+    """Tenta resolver um medicamento por nome; se name=None, tenta inferir.
+
+    Retorna (med, error_msg). Se med for None, error_msg explica o porquê.
+    """
+    if name:
+        med = medications_service.get_by_name(name)
+        if med is None:
+            return None, f"Não achei medicamento \"{name}\" ativo."
+        return med, None
+    solo = medications_service.find_solo_active()
+    if solo is None:
+        actives = medications_service.list_active()
+        if not actives:
+            return None, "Você não tem medicamentos cadastrados."
+        names = ", ".join(m["name"] for m in actives)
+        return None, f"Tem mais de um medicamento ativo ({names}). Diz qual."
+    return medications_service.get_by_id(solo["id"]), None
+
+
+async def _dispatch_medication(intent_data: dict) -> str:
+    intent = intent_data["intent"]
+    reply = intent_data.get("reply", "").strip()
+
+    if intent == "create_medication":
+        name = intent_data["medication_name"]
+        cron = intent_data["cron"]
+        existing = medications_service.get_by_name(name)
+        if existing:
+            return (
+                f"Já tem um medicamento chamado \"{name}\". "
+                "Apaga antes (\"para de me lembrar do {name}\") e cria de novo."
+            )
+        try:
+            med_id = medications_service.create(name, cron)
+            add_medication_job(med_id, name, cron)
+        except Exception as e:
+            log.exception("Falha ao criar medicamento")
+            return f"Não consegui agendar (cron inválido?): {e}"
+        return reply or (
+            f"💊 *{name}* cadastrado. Vou te lembrar com botões nos horários definidos."
+        )
+
+    if intent == "list_medications":
+        rows = medications_service.list_active()
+        if not rows:
+            return "Nenhum medicamento cadastrado."
+        lines = [f"💊 Seus medicamentos ({len(rows)}):"]
+        for r in rows:
+            lines.append(f"• {r['name']} — cron: `{r['schedule_cron']}`")
+        return "\n".join(lines)
+
+    if intent == "delete_medication":
+        med, err = _resolve_medication(intent_data.get("medication_name"))
+        if err:
+            return err
+        ok = medications_service.deactivate(med["id"])
+        if ok:
+            try:
+                remove_medication_job(med["id"])
+            except Exception:
+                log.exception("Falha ao remover job do medicamento %s", med["id"])
+        return reply or (
+            f"Removido. Não vou mais te lembrar do {med['name']}."
+            if ok
+            else "Falhou ao remover."
+        )
+
+    if intent == "track_medication":
+        med, err = _resolve_medication(intent_data.get("medication_name"))
+        if err:
+            return err
+        if medications_service.has_intake_today(med["id"]):
+            return f"Já estava registrado que você tomou {med['name']} hoje ✅"
+        medications_service.track(med["id"], skipped=False)
+        return reply or f"💊 {med['name']}: registrado como tomado ✅"
+
+    if intent == "untrack_medication":
+        med, err = _resolve_medication(intent_data.get("medication_name"))
+        if err:
+            return err
+        removed = medications_service.untrack_today(med["id"])
+        if removed:
+            return reply or f"Tomada de hoje do {med['name']} apagada."
+        return f"Não tinha registro de tomada de hoje pro {med['name']}."
+
+    if intent == "medication_compliance":
+        med, err = _resolve_medication(intent_data.get("medication_name"))
+        if err:
+            return err
+        days = intent_data.get("days", 30)
+        result = medications_service.compliance(med["id"], days=days)
+        bar_filled = int(result["percent"] // 10)
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
+        body = (
+            f"💊 *{med['name']}* — últimos {result['total']} dias\n"
+            f"{result['taken']}/{result['total']} dias tomados ({result['percent']}%)\n"
+            f"{bar}"
+        )
+        if result["taken"] and result["taken"] <= 12:
+            body += "\n\nDias: " + ", ".join(result["dates_taken"])
+        prefix = (reply + "\n\n") if reply else ""
+        return prefix + body
+
+    return reply or "(sem resposta)"
 
 
 async def _dispatch_workout(intent_data: dict) -> str:
@@ -373,6 +494,9 @@ async def _dispatch(intent_data: dict) -> str:
 
     if intent in _WORKOUT_INTENTS:
         return await _dispatch_workout(intent_data)
+
+    if intent in _MEDICATION_INTENTS:
+        return await _dispatch_medication(intent_data)
 
     if intent == "chat":
         return reply or "(sem resposta)"

@@ -89,6 +89,25 @@ CREATE TABLE IF NOT EXISTS session_logs (
 
 CREATE INDEX IF NOT EXISTS idx_session_logs_session ON session_logs(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_logs_exercise ON session_logs(exercise_name);
+
+CREATE TABLE IF NOT EXISTS medications (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    schedule_cron TEXT NOT NULL,
+    active        INTEGER DEFAULT 1,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS medication_intakes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    medication_id INTEGER NOT NULL,
+    taken_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    skipped       INTEGER DEFAULT 0,
+    FOREIGN KEY (medication_id) REFERENCES medications(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_medication_intakes_med ON medication_intakes(medication_id);
+CREATE INDEX IF NOT EXISTS idx_medication_intakes_when ON medication_intakes(taken_at);
 """
 
 

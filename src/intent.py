@@ -37,6 +37,13 @@ VALID_INTENTS = {
     "cancel_workout_session",
     "show_exercise_history",
     "start_rest_timer",
+    # Medicações
+    "create_medication",
+    "list_medications",
+    "delete_medication",
+    "track_medication",
+    "untrack_medication",
+    "medication_compliance",
 }
 
 _RETRY_DELAY_RE = re.compile(r"retry in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
@@ -148,6 +155,36 @@ Sua tarefa é decidir o que fazer com a mensagem do Guilherme e responder em JSO
 21. "start_rest_timer" — quando ele pede um timer de descanso entre séries.
     Exemplos: "descanso de 90s", "timer 2 min", "me avisa daqui 60 segundos".
     Campos: seconds (int, mínimo 10, máximo 600), reply (curta).
+
+=== MEDICAÇÕES ===
+
+IMPORTANTE: medicamentos têm um sistema próprio (com botões inline e tracking de adesão).
+Sempre que ele falar de remédio/medicamento/vitamina/suplemento, prefira os intents abaixo
+em vez de "create_recurring_reminder" / "save_memory".
+
+22. "create_medication" — quando ele quer ser lembrado de tomar um medicamento em horário(s) recorrente(s).
+    Exemplos: "todo dia 9h tomar sertralina", "vitamina D às 8h da manhã todo dia", "remédio da tireoide 7h da manhã".
+    Campos: medication_name (nome do medicamento), cron (5 campos crontab), reply (confirmação curta).
+
+23. "list_medications" — listar medicamentos cadastrados.
+    Exemplos: "meus remédios", "quais medicamentos tomo?", "lista os medicamentos".
+    Campos: reply (curta — a lista será adicionada).
+
+24. "delete_medication" — parar de lembrar de um medicamento.
+    Exemplos: "para de me lembrar da sertralina", "tira a vitamina D dos remédios", "parei de tomar X".
+    Campos: medication_name, reply.
+
+25. "track_medication" — registrar manualmente que tomou (caso ele não tenha clicado o botão na hora).
+    Exemplos: "tomei a sertralina", "já tomei a vitamina hoje", "tomei o remédio".
+    Campos: medication_name (opcional — se omitido e só houver 1 medicamento ativo, infere; senão peça o nome), reply.
+
+26. "untrack_medication" — desfazer a tomada de hoje.
+    Exemplos: "não tomei a sertralina hoje", "tira o registro de hoje", "esquece, não tomei".
+    Campos: medication_name (opcional), reply.
+
+27. "medication_compliance" — quantos dias ele tomou em uma janela.
+    Exemplos: "quantos dias tomei sertralina nos últimos 15?", "como tá minha adesão?", "tomei quantos dias dos últimos 7?", "tomei quantos dias esse mês?".
+    Campos: medication_name (opcional), days (int, default 30), reply (curta — o resumo será adicionado).
 
 === CONTEXTO DE IMAGEM ===
 
@@ -347,6 +384,26 @@ def _coerce(parsed: dict, user_message: str) -> dict:
             result["reply"] = reply or "Quantos segundos de descanso? (entre 10 e 600)"
         else:
             result["seconds"] = seconds
+
+    # ---------- Medicações ----------
+    if intent == "create_medication":
+        result["medication_name"] = (parsed.get("medication_name") or "").strip()
+        result["cron"] = (parsed.get("cron") or "").strip()
+        if not result["medication_name"] or not result["cron"]:
+            result["intent"] = "chat"
+            result["reply"] = (
+                reply or "Faltou o nome do medicamento ou o horário. Pode repetir?"
+            )
+
+    if intent in {"delete_medication", "track_medication", "untrack_medication"}:
+        result["medication_name"] = (parsed.get("medication_name") or "").strip() or None
+
+    if intent == "medication_compliance":
+        result["medication_name"] = (parsed.get("medication_name") or "").strip() or None
+        days = _coerce_int(parsed.get("days"))
+        if days is None or days < 1:
+            days = 30
+        result["days"] = min(days, 365)
 
     # Fatos extraídos vêm na mesma chamada — economiza 1 request por mensagem.
     raw_facts = parsed.get("extracted_facts") or []

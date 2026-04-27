@@ -6,6 +6,7 @@ import google.generativeai as genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
 
 from .config import DAILY_DIGEST_HOUR, GEMINI_MODEL, OWNER_CHAT_ID
@@ -251,4 +252,60 @@ def load_reminders_from_db() -> int:
             log.exception("Falha ao carregar lembrete %s", r["id"])
 
     log.info("Carregados %d lembrete(s) do banco.", loaded)
+    return loaded
+
+
+# ---------- Medicamentos ----------
+
+async def _send_medication_reminder(med_id: int, name: str) -> None:
+    if _app is None:
+        log.error("App não inicializado, não consegui enviar med %s", med_id)
+        return
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Tomei ✅", callback_data=f"med_taken:{med_id}"),
+        InlineKeyboardButton("Pular ⏭️", callback_data=f"med_skip:{med_id}"),
+    ]])
+    try:
+        await _app.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=f"💊 Hora do {name}",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        log.exception("Erro ao enviar lembrete de medicamento %s", med_id)
+
+
+def add_medication_job(med_id: int, name: str, cron: str) -> None:
+    sched = get_scheduler()
+    trigger = CronTrigger.from_crontab(cron, timezone="America/Sao_Paulo")
+    sched.add_job(
+        _send_medication_reminder,
+        trigger=trigger,
+        args=[med_id, name],
+        id=f"medication_{med_id}",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+
+def remove_medication_job(med_id: int) -> None:
+    sched = get_scheduler()
+    job_id = f"medication_{med_id}"
+    if sched.get_job(job_id):
+        sched.remove_job(job_id)
+
+
+def load_medications_from_db() -> int:
+    loaded = 0
+    with conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT id, name, schedule_cron FROM medications WHERE active = 1"
+        ).fetchall()
+    for r in rows:
+        try:
+            add_medication_job(r["id"], r["name"], r["schedule_cron"])
+            loaded += 1
+        except Exception:
+            log.exception("Falha ao carregar medicamento %s", r["id"])
+    log.info("Carregados %d medicamento(s) do banco.", loaded)
     return loaded
