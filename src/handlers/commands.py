@@ -11,19 +11,19 @@ from .auth import owner_only
 
 WELCOME = """Olá, Guilherme! Sou seu assistente pessoal.
 
-Posso conversar com você usando IA (Gemini) e lembrar das suas informações ao longo do tempo.
+É só falar comigo de boa, sem comandos. Eu entendo o que você quer:
 
-Comandos disponíveis:
-/lembrar <texto> — salvar uma memória
-/rotina <texto> — salvar uma rotina
-/listar [categoria] — ver memórias
-/esquecer <id> — apagar memória
-/lembrete <quando> <texto> — agendar lembrete
-/agenda — ver lembretes
-/cancelar <id> — cancelar lembrete
-/help — esta mensagem
+• "me lembra daqui 10 min de beber água"
+• "amanhã 9h tenho reunião com cliente"
+• "todo dia às 8h tomar vitamina"
+• "lembra que eu prefiro café preto"
+• "o que você sabe sobre mim?"
+• "quais lembretes tenho?"
+• "cancela o lembrete 3"
 
-Mande qualquer mensagem normal e eu respondo usando IA, lembrando do que você já me contou.
+Vou guardar o que for relevante sobre você e usar isso pra te ajudar melhor.
+
+Se preferir, /help mostra os atalhos por comando.
 """
 
 

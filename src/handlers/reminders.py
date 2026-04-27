@@ -4,11 +4,9 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from ..db import conn_ctx
-from ..scheduler import add_reminder_job, remove_reminder_job
+from ..reminders import cancel, create_one_shot, list_active
 from .auth import owner_only
 
-DATETIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})$")
 DATE_ONLY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})$")
 TIME_ONLY_RE = re.compile(r"^(\d{2}:\d{2})$")
 
@@ -21,7 +19,6 @@ def _parse_when(tokens: list[str]) -> tuple[datetime, int]:
     now = datetime.now()
     first = tokens[0].lower()
 
-    # "hoje HH:MM"
     if first == "hoje" and len(tokens) >= 2 and TIME_ONLY_RE.match(tokens[1]):
         h, m = map(int, tokens[1].split(":"))
         run_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -29,20 +26,17 @@ def _parse_when(tokens: list[str]) -> tuple[datetime, int]:
             raise ValueError("horário de hoje já passou")
         return run_at, 2
 
-    # "amanhã HH:MM"
     if first in {"amanhã", "amanha"} and len(tokens) >= 2 and TIME_ONLY_RE.match(tokens[1]):
         h, m = map(int, tokens[1].split(":"))
         target = (now + timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
         return target, 2
 
-    # "YYYY-MM-DD HH:MM"
     if len(tokens) >= 2 and DATE_ONLY_RE.match(tokens[0]) and TIME_ONLY_RE.match(tokens[1]):
         run_at = datetime.fromisoformat(f"{tokens[0]}T{tokens[1]}:00")
         if run_at <= now:
             raise ValueError("data/hora já passou")
         return run_at, 2
 
-    # "YYYY-MM-DDTHH:MM" ou "YYYY-MM-DDTHH:MM:SS"
     try:
         run_at = datetime.fromisoformat(tokens[0])
         if run_at <= now:
@@ -79,18 +73,10 @@ async def cmd_lembrete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await msg.reply_text("Texto do lembrete está vazio.")
         return
 
-    cron_or_at = run_at.isoformat(timespec="seconds")
-    with conn_ctx() as conn:
-        cur = conn.execute(
-            "INSERT INTO reminders (text, cron_or_at, is_recurring, active) VALUES (?, ?, 0, 1)",
-            (text, cron_or_at),
-        )
-        reminder_id = cur.lastrowid
-
     try:
-        add_reminder_job(reminder_id, text, cron_or_at, is_recurring=False)
+        reminder_id, _ = create_one_shot(text, run_at)
     except Exception as e:
-        await msg.reply_text(f"Salvo no banco mas falhou ao agendar: {e}")
+        await msg.reply_text(f"Falhou ao agendar: {e}")
         return
 
     await msg.reply_text(
@@ -101,11 +87,7 @@ async def cmd_lembrete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @owner_only
 async def cmd_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
-    with conn_ctx() as conn:
-        rows = conn.execute(
-            "SELECT id, text, cron_or_at, is_recurring FROM reminders "
-            "WHERE active = 1 ORDER BY cron_or_at"
-        ).fetchall()
+    rows = list_active()
 
     if not rows:
         await msg.reply_text("Nenhum lembrete ativo.")
@@ -131,17 +113,7 @@ async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await msg.reply_text("ID deve ser um número.")
         return
 
-    with conn_ctx() as conn:
-        cur = conn.execute(
-            "UPDATE reminders SET active = 0 WHERE id = ? AND active = 1", (rid,)
-        )
-        ok = cur.rowcount > 0
-
-    if ok:
-        try:
-            remove_reminder_job(rid)
-        except Exception:
-            pass
+    if cancel(rid):
         await msg.reply_text(f"Lembrete {rid} cancelado.")
     else:
         await msg.reply_text(f"Lembrete {rid} não encontrado ou já inativo.")

@@ -22,4 +22,4 @@ GEMINI_API_KEY = _required("GEMINI_API_KEY")
 OWNER_CHAT_ID = int(_required("OWNER_CHAT_ID"))
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
-DB_PATH = PROJECT_ROOT / "bot.db"
+DB_PATH = Path(os.getenv("DB_PATH", str(PROJECT_ROOT / "bot.db")))

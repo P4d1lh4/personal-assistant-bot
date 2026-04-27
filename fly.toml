@@ -1,0 +1,13 @@
+app = "app-red-snowflake-6363"
+primary_region = "gru"
+
+[build]
+
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
