@@ -24,6 +24,19 @@ VALID_INTENTS = {
     "search_memories",
     "cancel_reminder",
     "delete_memory",
+    # Treinos
+    "create_workout",
+    "list_workouts",
+    "show_workout",
+    "delete_workout",
+    "set_workout_schedule",
+    "show_workout_schedule",
+    "start_workout_session",
+    "log_set",
+    "finish_workout_session",
+    "cancel_workout_session",
+    "show_exercise_history",
+    "start_rest_timer",
 }
 
 _RETRY_DELAY_RE = re.compile(r"retry in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
@@ -80,6 +93,68 @@ Sua tarefa é decidir o que fazer com a mensagem do Guilherme e responder em JSO
 9. "delete_memory" — quando ele pede pra esquecer/apagar uma memória específica.
    Campos: id (número), reply.
 
+=== TREINOS DE ACADEMIA ===
+
+10. "create_workout" — quando ele descreve/cria um treino de academia (ou manda foto de plano de treino para você cadastrar).
+    Exemplos: "cria treino A com supino 4x10, agachamento 4x12 com 60kg", "salva isso como Treino Push: supino reto 4x8, supino inclinado 3x10, tríceps na polia 3x15".
+    Se já existir treino com mesmo nome, este intent SUBSTITUI os exercícios (upsert).
+    Campos: workout_name (nome curto), workout_description (opcional), exercises (lista de objetos {name, sets, reps, weight, notes}), reply.
+    No campo "exercises":
+    - "name": nome do exercício (ex: "supino reto", "agachamento livre")
+    - "sets": número de séries (int)
+    - "reps": string ("10", "8-12", "até falha")
+    - "weight": peso em kg (float, opcional — null se não citado)
+    - "notes": observações curtas (opcional)
+
+11. "list_workouts" — quando ele pergunta quais treinos tem cadastrados.
+    Exemplos: "quais treinos tenho?", "meus treinos", "lista os treinos".
+    Campos: reply (curta — a lista será adicionada automaticamente).
+
+12. "show_workout" — quando ele pede detalhes de um treino específico.
+    Exemplos: "mostra o treino A", "como é o treino Push?".
+    Campos: workout_name, reply (curta).
+
+13. "delete_workout" — quando ele pede pra apagar um treino.
+    Campos: workout_name, reply.
+
+14. "set_workout_schedule" — quando ele monta a rotina semanal.
+    Exemplos: "segunda treino A, quarta B, sexta C", "domingo é descanso", "tira o treino de quinta".
+    Campos: schedule_assignments (lista de {weekday, workout_name}). Use weekday em português ("segunda", "terça", ..., "domingo"). Se for descanso, workout_name = null. Reply.
+
+15. "show_workout_schedule" — quando ele pergunta sobre a rotina/treino do dia ou da semana.
+    Exemplos: "qual o treino de hoje?", "minha semana", "treino de quarta".
+    Campos: scope ("today" | "week" | "weekday"), weekday (se scope="weekday"), reply (curta).
+
+16. "start_workout_session" — quando ele anuncia que vai começar a treinar.
+    Exemplos: "vou treinar A agora", "começando treino", "tô na academia". Se ele não citar qual treino, deixe workout_name vazio (será inferido pelo schedule do dia).
+    Campos: workout_name (opcional), reply.
+
+17. "log_set" — quando ele registra uma série feita (use SOMENTE se houver sessão ativa, mas extraia mesmo assim — o handler valida).
+    Exemplos: "supino 60 por 10", "agachamento 80 8 reps", "fiz 12 com 40", "supino 60x10".
+    Campos: exercise_name (nome do exercício; se omitido, deixe vazio), reps_done (int), weight_used (float kg, null se não citado), notes (opcional), reply.
+
+18. "finish_workout_session" — quando ele encerra o treino.
+    Exemplos: "acabei", "terminei o treino", "fim".
+    Campos: reply (curta — o resumo será adicionado automaticamente).
+
+19. "cancel_workout_session" — quando ele desiste/cancela uma sessão sem encerrar normalmente.
+    Exemplos: "cancela o treino", "esquece, não vou treinar".
+    Campos: reply.
+
+20. "show_exercise_history" — quando ele pergunta sobre o histórico/progressão de um exercício.
+    Exemplos: "como tá meu supino?", "histórico de agachamento", "evolução do levantamento terra".
+    Campos: exercise_name, reply (curta).
+
+21. "start_rest_timer" — quando ele pede um timer de descanso entre séries.
+    Exemplos: "descanso de 90s", "timer 2 min", "me avisa daqui 60 segundos".
+    Campos: seconds (int, mínimo 10, máximo 600), reply (curta).
+
+=== CONTEXTO DE IMAGEM ===
+
+Se a mensagem incluir uma FOTO:
+- Se parecer um plano/ficha de treino (lista de exercícios com séries/reps): use "create_workout" e extraia os exercícios. Se ele citou nome ("salva como A"), use; senão deixe workout_name como "Novo treino" e peça confirmação na reply.
+- Se for outro tipo de imagem: use "chat" e descreva brevemente o que viu.
+
 CAMPO EXTRA (em qualquer intent, exceto save_memory): "extracted_facts"
 - Lista de fatos novos sobre o Guilherme que apareceram NESTA mensagem e merecem ser memorizados a longo prazo.
 - Cada fato é um objeto com chaves "category" (uma de: fact, preference, routine, goal, habit) e "content" (texto curto e claro).
@@ -130,6 +205,44 @@ def _strip_fences(raw: str) -> str:
     return raw
 
 
+def _coerce_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_exercises(raw) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for ex in raw:
+        if not isinstance(ex, dict):
+            continue
+        name = (ex.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "sets": _coerce_int(ex.get("sets")),
+            "reps": str(ex["reps"]).strip() if ex.get("reps") is not None and str(ex.get("reps")).strip() else None,
+            "weight": _coerce_float(ex.get("weight") or ex.get("target_weight")),
+            "notes": (ex.get("notes") or "").strip() or None,
+        })
+    return out
+
+
 def _coerce(parsed: dict, user_message: str) -> dict:
     intent = (parsed.get("intent") or "chat").strip().lower()
     if intent not in VALID_INTENTS:
@@ -168,6 +281,73 @@ def _coerce(parsed: dict, user_message: str) -> dict:
             result["intent"] = "chat"
             result["reply"] = reply or "Qual o número/ID? Manda /listar ou /agenda pra ver."
 
+    # ---------- Treinos ----------
+    if intent == "create_workout":
+        result["workout_name"] = (parsed.get("workout_name") or "").strip()
+        result["workout_description"] = (parsed.get("workout_description") or "").strip() or None
+        result["exercises"] = _coerce_exercises(parsed.get("exercises"))
+        if not result["workout_name"] or not result["exercises"]:
+            result["intent"] = "chat"
+            result["reply"] = (
+                reply or "Faltou o nome do treino ou os exercícios. Pode descrever de novo?"
+            )
+
+    if intent in {"show_workout", "delete_workout"}:
+        result["workout_name"] = (parsed.get("workout_name") or "").strip()
+        if not result["workout_name"]:
+            result["intent"] = "chat"
+            result["reply"] = reply or "Qual treino? Me passa o nome."
+
+    if intent == "set_workout_schedule":
+        raw_assign = parsed.get("schedule_assignments") or []
+        assignments = []
+        if isinstance(raw_assign, list):
+            for a in raw_assign:
+                if not isinstance(a, dict):
+                    continue
+                weekday_raw = a.get("weekday")
+                workout_name = a.get("workout_name")
+                if isinstance(workout_name, str):
+                    workout_name = workout_name.strip() or None
+                assignments.append({
+                    "weekday": weekday_raw,
+                    "workout_name": workout_name,
+                })
+        result["schedule_assignments"] = assignments
+        if not assignments:
+            result["intent"] = "chat"
+            result["reply"] = reply or "Não entendi quais dias e treinos. Pode repetir?"
+
+    if intent == "show_workout_schedule":
+        scope = (parsed.get("scope") or "today").strip().lower()
+        if scope not in {"today", "week", "weekday"}:
+            scope = "today"
+        result["scope"] = scope
+        result["weekday"] = parsed.get("weekday")
+
+    if intent == "start_workout_session":
+        result["workout_name"] = (parsed.get("workout_name") or "").strip() or None
+
+    if intent == "log_set":
+        result["exercise_name"] = (parsed.get("exercise_name") or "").strip()
+        result["reps_done"] = _coerce_int(parsed.get("reps_done"))
+        result["weight_used"] = _coerce_float(parsed.get("weight_used"))
+        result["notes"] = (parsed.get("notes") or "").strip() or None
+
+    if intent == "show_exercise_history":
+        result["exercise_name"] = (parsed.get("exercise_name") or "").strip()
+        if not result["exercise_name"]:
+            result["intent"] = "chat"
+            result["reply"] = reply or "Histórico de qual exercício?"
+
+    if intent == "start_rest_timer":
+        seconds = _coerce_int(parsed.get("seconds"))
+        if seconds is None or seconds < 10 or seconds > 600:
+            result["intent"] = "chat"
+            result["reply"] = reply or "Quantos segundos de descanso? (entre 10 e 600)"
+        else:
+            result["seconds"] = seconds
+
     # Fatos extraídos vêm na mesma chamada — economiza 1 request por mensagem.
     raw_facts = parsed.get("extracted_facts") or []
     facts: list[dict] = []
@@ -196,50 +376,70 @@ def _fallback(user_message: str, error: str) -> dict:
     }
 
 
-async def classify_and_respond(user_message: str) -> dict:
+async def classify_and_respond(
+    user_message: str,
+    image_path: str | None = None,
+    image_mime: str = "image/jpeg",
+) -> dict:
     """Chama o Gemini uma única vez: classifica intent e gera reply.
 
-    Retorna dict com chaves: intent, reply, e campos específicos da intent
-    (text, datetime_iso, cron, category, id).
+    Se `image_path` for passado, inclui a imagem no contexto da chamada
+    (o prompt já instrui como interpretar fotos de plano de treino).
     """
     now = datetime.now()
-    prompt = _build_prompt(user_message, now)
+    prompt = _build_prompt(user_message or "(usuário enviou apenas uma imagem)", now)
 
     model = genai.GenerativeModel(
         GEMINI_MODEL,
         generation_config={"response_mime_type": "application/json"},
     )
 
-    try:
-        response = await model.generate_content_async(prompt)
-        raw = response.text or ""
-    except ResourceExhausted as e:
-        retry = _parse_retry_delay(e)
-        retry_msg = f" Tenta de novo em ~{retry}s." if retry else " Tenta de novo daqui a pouco."
-        log.warning("Gemini quota exceeded (retry=%ss)", retry)
-        return {
-            "intent": "chat",
-            "reply": f"Atingi o limite de uso da API do Gemini agora.{retry_msg}",
-            "extracted_facts": [],
-        }
-    except Exception as e:
-        log.exception("Erro ao chamar Gemini para classificação")
-        return _fallback(user_message, f"api_error: {e}")
-
-    raw = _strip_fences(raw)
-    if not raw:
-        return _fallback(user_message, "empty_response")
+    uploaded = None
+    if image_path:
+        uploaded = await asyncio.to_thread(
+            genai.upload_file, image_path, mime_type=image_mime
+        )
 
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        log.warning("JSON inválido do modelo: %r", raw[:300])
-        return _fallback(user_message, f"json_error: {e}")
+        api_content = [prompt, uploaded] if uploaded else prompt
+        try:
+            response = await model.generate_content_async(api_content)
+            raw = response.text or ""
+        except ResourceExhausted as e:
+            retry = _parse_retry_delay(e)
+            retry_msg = (
+                f" Tenta de novo em ~{retry}s." if retry else " Tenta de novo daqui a pouco."
+            )
+            log.warning("Gemini quota exceeded (retry=%ss)", retry)
+            return {
+                "intent": "chat",
+                "reply": f"Atingi o limite de uso da API do Gemini agora.{retry_msg}",
+                "extracted_facts": [],
+            }
+        except Exception as e:
+            log.exception("Erro ao chamar Gemini para classificação")
+            return _fallback(user_message, f"api_error: {e}")
 
-    if not isinstance(parsed, dict):
-        return _fallback(user_message, "not_a_dict")
+        raw = _strip_fences(raw)
+        if not raw:
+            return _fallback(user_message, "empty_response")
 
-    return _coerce(parsed, user_message)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            log.warning("JSON inválido do modelo: %r", raw[:300])
+            return _fallback(user_message, f"json_error: {e}")
+
+        if not isinstance(parsed, dict):
+            return _fallback(user_message, "not_a_dict")
+
+        return _coerce(parsed, user_message)
+    finally:
+        if uploaded is not None:
+            try:
+                await asyncio.to_thread(genai.delete_file, uploaded.name)
+            except Exception:
+                log.warning("Falha ao remover upload %s", uploaded.name)
 
 
 _TRANSCRIPTION_PROMPT = (

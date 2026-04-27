@@ -9,7 +9,7 @@ from telegram.ext import (
 
 from .config import TELEGRAM_TOKEN
 from .db import init_db
-from .handlers.chat import handle_message, handle_voice
+from .handlers.chat import handle_message, handle_photo, handle_voice
 from .handlers.commands import (
     cmd_esquecer,
     cmd_help,
@@ -60,6 +60,7 @@ def build_app() -> Application:
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     return app
 

@@ -65,8 +65,9 @@ def _cleanup_old_conversations(retention_days: int = 30) -> int:
 _WEEKDAY_PT = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
 
 
-def _collect_digest_data(today: datetime) -> tuple[str, str]:
+def _collect_digest_data(today: datetime) -> tuple[str, str, str]:
     today_str = today.date().isoformat()
+    today_idx = today.weekday()
     with conn_ctx() as conn:
         reminder_rows = conn.execute(
             "SELECT text, cron_or_at, is_recurring FROM reminders WHERE active = 1"
@@ -76,6 +77,19 @@ def _collect_digest_data(today: datetime) -> tuple[str, str]:
             "WHERE category IN ('routine', 'goal') "
             "ORDER BY created_at DESC LIMIT 10"
         ).fetchall()
+        workout_row = conn.execute(
+            "SELECT w.id, w.name FROM workout_schedule s "
+            "LEFT JOIN workouts w ON w.id = s.workout_id "
+            "WHERE s.weekday = ?",
+            (today_idx,),
+        ).fetchone()
+        exercises_rows = []
+        if workout_row and workout_row["id"]:
+            exercises_rows = conn.execute(
+                "SELECT name, sets, reps, target_weight FROM workout_exercises "
+                "WHERE workout_id = ? ORDER BY order_index, id",
+                (workout_row["id"],),
+            ).fetchall()
 
     todays_reminders = []
     for r in reminder_rows:
@@ -90,7 +104,26 @@ def _collect_digest_data(today: datetime) -> tuple[str, str]:
     memories_block = "\n".join(
         f"- [{m['category']}] {m['content']}" for m in memory_rows
     ) or "(sem rotinas/metas anotadas)"
-    return reminders_block, memories_block
+
+    if workout_row is None:
+        workout_block = "(sem treino agendado)"
+    elif workout_row["id"] is None:
+        workout_block = "Descanso 💆"
+    else:
+        ex_lines = []
+        for ex in exercises_rows:
+            parts = [ex["name"]]
+            if ex["sets"] and ex["reps"]:
+                parts.append(f"{ex['sets']}x{ex['reps']}")
+            if ex["target_weight"]:
+                w = ex["target_weight"]
+                parts.append(f"{int(w)}kg" if float(w).is_integer() else f"{w:g}kg")
+            ex_lines.append(f"- {' '.join(parts)}")
+        workout_block = f"Treino {workout_row['name']}\n" + (
+            "\n".join(ex_lines) or "(sem exercícios cadastrados)"
+        )
+
+    return reminders_block, memories_block, workout_block
 
 
 async def _send_daily_digest() -> None:
@@ -100,15 +133,16 @@ async def _send_daily_digest() -> None:
 
     today = datetime.now()
     weekday_pt = _WEEKDAY_PT[today.weekday()]
-    reminders_block, memories_block = _collect_digest_data(today)
+    reminders_block, memories_block, workout_block = _collect_digest_data(today)
 
     prompt = (
         f"Você é o assistente pessoal do Guilherme. Crie uma mensagem curta "
-        f"(3-5 linhas) de bom dia, em português brasileiro, mencionando os "
-        f"compromissos do dia e suas rotinas/metas relevantes. Tom natural, "
-        f"direto, próximo. Sem markdown, sem bullets formais.\n\n"
+        f"(3-6 linhas) de bom dia, em português brasileiro, mencionando os "
+        f"compromissos do dia, treino do dia (se houver) e rotinas/metas relevantes. "
+        f"Tom natural, direto, próximo. Sem markdown, sem bullets formais.\n\n"
         f"Hoje é {today.date().isoformat()} ({weekday_pt}).\n\n"
         f"Lembretes de hoje:\n{reminders_block}\n\n"
+        f"Treino de hoje:\n{workout_block}\n\n"
         f"Rotinas e metas:\n{memories_block}\n\n"
         f"Mensagem:"
     )
@@ -122,7 +156,11 @@ async def _send_daily_digest() -> None:
         log.exception("Falha ao gerar resumo diário, usando fallback")
 
     if not text:
-        text = f"Bom dia, Guilherme!\n\nLembretes de hoje:\n{reminders_block}"
+        text = (
+            f"Bom dia, Guilherme!\n\n"
+            f"Lembretes de hoje:\n{reminders_block}\n\n"
+            f"Treino de hoje:\n{workout_block}"
+        )
 
     try:
         await _app.bot.send_message(chat_id=OWNER_CHAT_ID, text=text)
