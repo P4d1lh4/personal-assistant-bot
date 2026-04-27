@@ -9,7 +9,7 @@ from ..memory import (
 )
 from .auth import owner_only
 
-WELCOME = """Olá, Guilherme! Sou seu assistente pessoal.
+WELCOME = """Sou seu assistente pessoal.
 
 É só falar comigo de boa, sem comandos. Eu entendo o que você quer:
 
