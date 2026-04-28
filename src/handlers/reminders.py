@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime, timedelta
 
@@ -6,6 +7,8 @@ from telegram.ext import ContextTypes
 
 from ..reminders import cancel, create_one_shot, list_active
 from .auth import owner_only
+
+log = logging.getLogger(__name__)
 
 DATE_ONLY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})$")
 TIME_ONLY_RE = re.compile(r"^(\d{2}:\d{2})$")
@@ -75,8 +78,9 @@ async def cmd_lembrete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         reminder_id, _ = create_one_shot(text, run_at)
-    except Exception as e:
-        await msg.reply_text(f"Falhou ao agendar: {e}")
+    except Exception:
+        log.exception("Falha ao agendar lembrete via comando")
+        await msg.reply_text("Falhou ao agendar o lembrete.")
         return
 
     await msg.reply_text(

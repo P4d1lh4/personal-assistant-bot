@@ -1,9 +1,16 @@
+import asyncio
+import contextlib
 import logging
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from telegram import Message, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -210,9 +217,9 @@ async def _dispatch_medication(intent_data: dict) -> str:
         try:
             med_id = medications_service.create(name, cron)
             add_medication_job(med_id, name, cron)
-        except Exception as e:
+        except Exception:
             log.exception("Falha ao criar medicamento")
-            return f"Não consegui agendar (cron inválido?): {e}"
+            return "Não consegui cadastrar — formato de horário pode estar inválido."
         return reply or (
             f"💊 *{name}* cadastrado. Vou te lembrar com botões nos horários definidos."
         )
@@ -303,9 +310,9 @@ async def _dispatch_workout(intent_data: dict) -> str:
                 )
                 workout = workouts_service.get_workout(wid)
                 base = reply or f"Treino *{name}* criado."
-        except Exception as e:
+        except Exception:
             log.exception("Falha ao criar/atualizar treino")
-            return f"Não consegui salvar o treino: {e}"
+            return "Não consegui salvar o treino. Tenta de novo."
         return f"{base}\n\n{_format_workout_detail(workout)}"
 
     if intent == "list_workouts":
@@ -422,9 +429,9 @@ async def _dispatch_workout(intent_data: dict) -> str:
             )
         except workouts_service.NoActiveSession:
             return "Você não tá em nenhum treino ativo. Manda \"vou treinar X\" antes."
-        except Exception as e:
+        except Exception:
             log.exception("Falha ao logar série")
-            return f"Falhou ao registrar: {e}"
+            return "Falhou ao registrar. Tenta de novo."
 
         bits = [f"✅ {ex_name}"]
         weight = intent_data.get("weight_used")
@@ -481,9 +488,9 @@ async def _dispatch_workout(intent_data: dict) -> str:
             rid, _ = reminders_service.create_one_shot(
                 f"⏱️ Descanso de {seconds}s acabou — próxima série!", run_at
             )
-        except Exception as e:
+        except Exception:
             log.exception("Falha ao criar timer de descanso")
-            return f"Falhou ao agendar timer: {e}"
+            return "Falhou ao agendar o timer. Tenta de novo."
         return reply or f"⏱️ Timer de {seconds}s iniciado. Te aviso quando acabar."
 
     if intent == "workout_stats":
@@ -528,93 +535,246 @@ async def _dispatch(intent_data: dict) -> str:
     if intent in _MEDICATION_INTENTS:
         return await _dispatch_medication(intent_data)
 
-    if intent == "chat":
-        return reply or "(sem resposta)"
-
-    if intent == "create_reminder":
-        text = intent_data.get("text", "").strip()
-        dt_iso = intent_data.get("datetime_iso", "").strip()
-        if not text or not dt_iso:
-            return "Faltou texto ou data/hora — pode repetir com mais detalhes?"
-        try:
-            run_at = datetime.fromisoformat(dt_iso)
-        except ValueError:
-            return f"Não entendi a data/hora ({dt_iso}). Pode reformular?"
-        if run_at <= datetime.now():
-            return "Esse horário já passou. Pode dar um momento futuro?"
-        try:
-            rid, _ = reminders_service.create_one_shot(text, run_at)
-        except Exception as e:
-            log.exception("Falha ao criar lembrete one-shot")
-            return f"Falhou ao agendar: {e}"
-        when_human = run_at.strftime("%d/%m/%Y às %H:%M")
-        base = reply or f"⏰ Lembrete agendado para {when_human}: {text}"
-        return f"{base}\n(id #{rid})"
-
-    if intent == "create_recurring_reminder":
-        text = intent_data.get("text", "").strip()
-        cron = intent_data.get("cron", "").strip()
-        if not text or not cron:
-            return "Faltou texto ou frequência — pode repetir?"
-        try:
-            rid = reminders_service.create_recurring(text, cron)
-        except Exception as e:
-            log.exception("Falha ao criar lembrete recorrente")
-            return f"Não consegui agendar (cron inválido?): {e}"
-        base = reply or f"🔁 Lembrete recorrente criado ({cron}): {text}"
-        return f"{base}\n(id #{rid})"
-
-    if intent == "save_memory":
-        text = intent_data.get("text", "").strip()
-        category = intent_data.get("category", "fact")
-        if not text:
-            return "O que você quer que eu lembre?"
-        mid = add_memory(category, text, source="manual")
-        return reply or f"Anotado (id #{mid}, categoria: {category})."
-
-    if intent == "list_memories":
-        category = intent_data.get("category")
-        rows = list_memories(category=category, limit=50)
-        listing = _format_memories(rows)
-        prefix = (reply + "\n\n") if reply else ""
-        return prefix + listing
-
-    if intent == "search_memories":
-        query = intent_data.get("query", "").strip()
-        if not query:
-            return reply or "O que você quer que eu busque?"
-        rows = search_memories(query)
-        if not rows:
-            return f"Não achei nada sobre \"{query}\" nas memórias."
-        listing = _format_memories(rows)
-        prefix = (reply + "\n\n") if reply else f"Achei {len(rows)} sobre \"{query}\":\n\n"
-        return prefix + listing
-
-    if intent == "list_reminders":
-        rows = reminders_service.list_active()
-        listing = _format_reminders(rows)
-        prefix = (reply + "\n\n") if reply else ""
-        return prefix + listing
-
-    if intent == "cancel_reminder":
-        rid = intent_data.get("id")
-        if not isinstance(rid, int):
-            return "Qual lembrete? Me passa o número (ex: cancelar 3)."
-        ok = reminders_service.cancel(rid)
-        if ok:
-            return reply or f"Lembrete #{rid} cancelado."
-        return f"Lembrete #{rid} não encontrado ou já inativo."
-
-    if intent == "delete_memory":
-        mid = intent_data.get("id")
-        if not isinstance(mid, int):
-            return "Qual memória? Me passa o número."
-        ok = delete_memory(mid)
-        if ok:
-            return reply or f"Memória #{mid} apagada."
-        return f"Memória #{mid} não encontrada."
+    handler = _INTENT_HANDLERS.get(intent)
+    if handler is not None:
+        return await handler(intent_data)
 
     return reply or "(sem resposta)"
+
+
+# ---------- handlers individuais (dispatch table) ----------
+
+
+async def _h_chat(d: dict) -> str:
+    return d.get("reply", "").strip() or "(sem resposta)"
+
+
+async def _h_create_reminder(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    text = d.get("text", "").strip()
+    dt_iso = d.get("datetime_iso", "").strip()
+    if not text or not dt_iso:
+        return "Faltou texto ou data/hora — pode repetir com mais detalhes?"
+    try:
+        run_at = datetime.fromisoformat(dt_iso)
+    except ValueError:
+        return f"Não entendi a data/hora ({dt_iso}). Pode reformular?"
+    if run_at <= datetime.now():
+        return "Esse horário já passou. Pode dar um momento futuro?"
+    try:
+        rid, _ = reminders_service.create_one_shot(text, run_at)
+    except Exception:
+        log.exception("Falha ao criar lembrete one-shot")
+        return "Falhou ao agendar o lembrete. Tenta de novo."
+    d["_reminder_id"] = rid
+    when_human = run_at.strftime("%d/%m/%Y às %H:%M")
+    base = reply or f"⏰ Lembrete agendado para {when_human}: {text}"
+    return f"{base}\n(id #{rid})"
+
+
+async def _h_create_recurring_reminder(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    text = d.get("text", "").strip()
+    cron = d.get("cron", "").strip()
+    if not text or not cron:
+        return "Faltou texto ou frequência — pode repetir?"
+    try:
+        rid = reminders_service.create_recurring(text, cron)
+    except Exception:
+        log.exception("Falha ao criar lembrete recorrente")
+        return "Não consegui agendar — formato de horário pode estar inválido."
+    d["_reminder_id"] = rid
+    base = reply or f"🔁 Lembrete recorrente criado ({cron}): {text}"
+    return f"{base}\n(id #{rid})"
+
+
+async def _h_save_memory(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    text = d.get("text", "").strip()
+    category = d.get("category", "fact")
+    if not text:
+        return "O que você quer que eu lembre?"
+    mid = add_memory(category, text, source="manual")
+    return reply or f"Anotado (id #{mid}, categoria: {category})."
+
+
+async def _h_list_memories(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    rows = list_memories(category=d.get("category"), limit=50)
+    listing = _format_memories(rows)
+    prefix = (reply + "\n\n") if reply else ""
+    return prefix + listing
+
+
+async def _h_search_memories(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    query = d.get("query", "").strip()
+    if not query:
+        return reply or "O que você quer que eu busque?"
+    rows = search_memories(query)
+    if not rows:
+        return f"Não achei nada sobre \"{query}\" nas memórias."
+    listing = _format_memories(rows)
+    prefix = (reply + "\n\n") if reply else f"Achei {len(rows)} sobre \"{query}\":\n\n"
+    return prefix + listing
+
+
+async def _h_list_reminders(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    rows = reminders_service.list_active()
+    listing = _format_reminders(rows)
+    prefix = (reply + "\n\n") if reply else ""
+    if 0 < len(rows) <= 5:
+        d["_reminder_ids"] = [r["id"] for r in rows]
+    return prefix + listing
+
+
+async def _h_cancel_reminder(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    rid = d.get("id")
+    if not isinstance(rid, int):
+        return "Qual lembrete? Me passa o número (ex: cancelar 3)."
+    ok = reminders_service.cancel(rid)
+    if ok:
+        return reply or f"Lembrete #{rid} cancelado."
+    return f"Lembrete #{rid} não encontrado ou já inativo."
+
+
+async def _h_delete_memory(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    mid = d.get("id")
+    if not isinstance(mid, int):
+        return "Qual memória? Me passa o número."
+    ok = delete_memory(mid)
+    if ok:
+        return reply or f"Memória #{mid} apagada."
+    return f"Memória #{mid} não encontrada."
+
+
+async def _h_show_status(d: dict) -> str:
+    return _build_status_panel(d.get("reply", "").strip())
+
+
+_INTENT_HANDLERS = {
+    "chat": _h_chat,
+    "create_reminder": _h_create_reminder,
+    "create_recurring_reminder": _h_create_recurring_reminder,
+    "save_memory": _h_save_memory,
+    "list_memories": _h_list_memories,
+    "search_memories": _h_search_memories,
+    "list_reminders": _h_list_reminders,
+    "cancel_reminder": _h_cancel_reminder,
+    "delete_memory": _h_delete_memory,
+    "show_status": _h_show_status,
+}
+
+
+def _build_status_panel(reply: str) -> str:
+    """Agrega lembretes, treino do dia, medicamentos e streak num panorama único."""
+    today_iso = datetime.now().date().isoformat()
+    sections: list[str] = []
+
+    # Lembretes ativos (próximos do dia + recorrentes)
+    rems = reminders_service.list_active()
+    todays = []
+    for r in rems:
+        if r["is_recurring"]:
+            todays.append(f"  • {r['text']} (recorrente)")
+        elif r["cron_or_at"].startswith(today_iso):
+            hhmm = r["cron_or_at"][11:16]
+            todays.append(f"  • {hhmm} — {r['text']}")
+    if todays:
+        sections.append("⏰ *Lembretes de hoje*\n" + "\n".join(todays))
+    else:
+        sections.append("⏰ Sem lembretes pra hoje.")
+
+    # Treino do dia
+    workout = workouts_service.get_today_workout()
+    if workout is None:
+        # Verificar se é descanso explícito
+        schedule = workouts_service.get_schedule()
+        today_idx = datetime.now().weekday()
+        if today_idx in schedule and schedule[today_idx] is None:
+            sections.append("💪 *Treino*: descanso 💆")
+        else:
+            sections.append("💪 *Treino*: nada agendado.")
+    else:
+        ex_count = len(workout.get("exercises") or [])
+        sections.append(
+            f"💪 *Treino de hoje*: {workout['name']} ({ex_count} exercícios)"
+        )
+
+    # Streak de treino
+    streak = workouts_service.get_workout_streak()
+    if streak > 0:
+        label = "dia" if streak == 1 else "dias"
+        sections.append(f"🔥 Streak: {streak} {label} consecutivos")
+
+    # Medicamentos + adesão dos últimos 7 dias
+    meds = medications_service.list_active()
+    if meds:
+        med_lines = ["💊 *Medicamentos*"]
+        for m in meds:
+            comp = medications_service.compliance(m["id"], days=7)
+            taken_today = (
+                "✅ hoje"
+                if medications_service.has_intake_today(m["id"])
+                else "⏳ pendente hoje"
+            )
+            med_lines.append(
+                f"  • {m['name']} — {taken_today} (7d: {comp['taken']}/7)"
+            )
+        sections.append("\n".join(med_lines))
+
+    body = "\n\n".join(sections)
+    prefix = (reply + "\n\n") if reply else "📋 *Status*\n\n"
+    return prefix + body
+
+
+def _build_markup(intent_data: dict) -> InlineKeyboardMarkup | None:
+    """Constrói teclado inline com base nos campos auxiliares (`_reminder_id`, `_reminder_ids`)."""
+    rid = intent_data.get("_reminder_id")
+    if isinstance(rid, int):
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancelar lembrete", callback_data=f"rem_cancel:{rid}")
+        ]])
+
+    rids = intent_data.get("_reminder_ids")
+    if isinstance(rids, list) and rids:
+        rows = [
+            [InlineKeyboardButton(f"❌ Cancelar #{rid}", callback_data=f"rem_cancel:{rid}")]
+            for rid in rids
+        ]
+        return InlineKeyboardMarkup(rows)
+    return None
+
+
+async def _keep_typing(message: Message, stop: asyncio.Event) -> None:
+    """Renova o indicador de "digitando" a cada 4s até stop.set()."""
+    while not stop.is_set():
+        try:
+            await message.chat.send_chat_action(action=ChatAction.TYPING)
+        except Exception:
+            log.debug("Falha ao enviar chat_action TYPING (ignorado)")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=4.0)
+        except asyncio.TimeoutError:
+            pass
+
+
+@contextlib.asynccontextmanager
+async def _typing_indicator(message: Message):
+    """Context manager: envia TYPING repetidamente enquanto o bloco roda."""
+    stop = asyncio.Event()
+    task = asyncio.create_task(_keep_typing(message, stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.TimeoutError:
+            task.cancel()
 
 
 async def _run_intent_pipeline(
@@ -625,18 +785,22 @@ async def _run_intent_pipeline(
 ) -> None:
     append_message("user", user_text or "(imagem)")
 
-    try:
-        intent_data = await classify_and_respond(
-            user_text, image_path=image_path, image_mime=image_mime
-        )
-        final_reply = await _dispatch(intent_data)
-    except Exception as e:
-        log.exception("Erro ao processar mensagem")
-        final_reply = f"Tive um erro: {e}"
-        intent_data = {"intent": "chat"}
+    intent_data: dict = {"intent": "chat"}
+    final_reply = ""
+    async with _typing_indicator(message):
+        try:
+            intent_data = await classify_and_respond(
+                user_text, image_path=image_path, image_mime=image_mime
+            )
+            final_reply = await _dispatch(intent_data)
+        except Exception:
+            log.exception("Erro ao processar mensagem")
+            final_reply = "Tive um problema processando isso. Tenta de novo daqui a pouco."
+            intent_data = {"intent": "chat"}
 
     append_message("assistant", final_reply)
-    await message.reply_text(final_reply)
+    markup = _build_markup(intent_data)
+    await message.reply_text(final_reply, reply_markup=markup)
 
     # Fatos vieram na mesma chamada do classify — sem 2ª request ao Gemini.
     for fact in intent_data.get("extracted_facts", []):
@@ -692,9 +856,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             transcription = await transcribe_voice(
                 str(tmp_path), mime_type=voice.mime_type or "audio/ogg"
             )
-        except Exception as e:
+        except Exception:
             log.exception("Falha ao transcrever áudio")
-            await message.reply_text(f"Não consegui transcrever o áudio: {e}")
+            await message.reply_text("Não consegui transcrever o áudio. Tenta de novo.")
             return
 
         # Mostra a transcrição pro usuário antes de processar — útil pra debug
@@ -744,9 +908,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             image_path=str(tmp_path),
             image_mime="image/jpeg",
         )
-    except Exception as e:
+    except Exception:
         log.exception("Falha ao processar foto")
-        await message.reply_text(f"Não consegui processar a imagem: {e}")
+        await message.reply_text("Não consegui processar a imagem. Tenta de novo.")
     finally:
         if tmp_path and tmp_path.exists():
             try:

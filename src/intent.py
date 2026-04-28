@@ -2,17 +2,42 @@ import asyncio
 import json
 import logging
 import re
+import time
+from collections import Counter
 from datetime import datetime
 from typing import Any
 
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import (
+    GoogleAPICallError,
+    ResourceExhausted,
+    RetryError,
+    ServiceUnavailable,
+)
 
 from .config import GEMINI_API_KEY, GEMINI_MODEL
 from .memory import get_memory_summary, get_recent_history
 
 genai.configure(api_key=GEMINI_API_KEY)
 log = logging.getLogger(__name__)
+
+# Métricas leves em memória (resetam quando o processo reinicia)
+_METRICS: dict[str, Any] = {
+    "intent_counts": Counter(),
+    "total_calls": 0,
+    "total_errors": 0,
+    "total_429": 0,
+}
+
+
+def get_metrics_snapshot() -> dict:
+    """Retorna cópia das métricas em memória."""
+    return {
+        "intent_counts": dict(_METRICS["intent_counts"]),
+        "total_calls": _METRICS["total_calls"],
+        "total_errors": _METRICS["total_errors"],
+        "total_429": _METRICS["total_429"],
+    }
 
 VALID_INTENTS = {
     "chat",
@@ -24,6 +49,7 @@ VALID_INTENTS = {
     "search_memories",
     "cancel_reminder",
     "delete_memory",
+    "show_status",
     # Treinos
     "create_workout",
     "list_workouts",
@@ -62,9 +88,10 @@ def _parse_retry_delay(err: Exception) -> int | None:
 VALID_CATEGORIES = {"fact", "preference", "routine", "goal", "habit"}
 
 
-_SYSTEM_PROMPT_TEMPLATE = """Você é um assistente pessoal. Conversa natural em português do Brasil, direta e útil.
-
-Data e hora atuais (timezone America/Sao_Paulo): __NOW__
+# O bloco abaixo é INTENCIONALMENTE estático para maximizar cache implícito do
+# Gemini 2.5 (prefixo idêntico = cacheável). Conteúdo dinâmico (data/hora,
+# memórias, histórico, mensagem atual) vai DEPOIS, em `_build_prompt`.
+_STATIC_SYSTEM_PROMPT = """Você é um assistente pessoal. Conversa natural em português do Brasil, direta e útil.
 
 Sua tarefa é decidir o que fazer com a mensagem do usuário e responder em JSON com um dos intents abaixo:
 
@@ -101,6 +128,10 @@ Sua tarefa é decidir o que fazer com a mensagem do usuário e responder em JSON
 
 9. "delete_memory" — quando ele pede pra esquecer/apagar uma memória específica.
    Campos: id (número), reply.
+
+9b. "show_status" — quando ele pede um panorama geral / resumo / status agregando lembretes ativos, treino do dia, medicamentos e adesão.
+    Exemplos: "status", "como tô", "panorama", "resumo", "me dá um resumo", "qual a situação?".
+    Campos: reply (curta, tipo "Aqui:" — o panorama será adicionado automaticamente).
 
 === TREINOS DE ACADEMIA ===
 
@@ -228,26 +259,43 @@ REGRAS:
 """
 
 
-def _system_prompt(now: datetime) -> str:
-    now_str = f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({now.strftime('%A')})"
-    return _SYSTEM_PROMPT_TEMPLATE.replace("__NOW__", now_str)
+# Limite p/ truncar respostas longas do assistente no histórico (compressão simples).
+_HISTORY_REPLY_MAX_CHARS = 120
+
+
+def _format_history(history: list[dict]) -> str:
+    """Formata histórico para o prompt, truncando respostas longas do bot."""
+    if not history:
+        return "(sem histórico anterior)"
+    lines = []
+    for h in history:
+        if h["role"] == "user":
+            lines.append(f"Usuário: {h['content']}")
+        else:
+            content = h["content"]
+            if len(content) > _HISTORY_REPLY_MAX_CHARS:
+                content = content[:_HISTORY_REPLY_MAX_CHARS].rstrip() + "…"
+            lines.append(f"Assistente: {content}")
+    return "\n".join(lines)
 
 
 def _build_prompt(user_message: str, now: datetime) -> str:
+    """Monta o prompt: parte estática (cacheável) + bloco dinâmico no final."""
     summary = get_memory_summary(limit_per_category=15)
     history = get_recent_history(limit=10)
-    history_text = "\n".join(
-        f"{'Usuário' if h['role'] == 'user' else 'Assistente'}: {h['content']}"
-        for h in history
-    ) or "(sem histórico anterior)"
+    now_str = f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({now.strftime('%A')})"
 
-    return f"""{_system_prompt(now)}
+    return f"""{_STATIC_SYSTEM_PROMPT}
+
+=== CONTEXTO DINÂMICO ===
+
+Data e hora atuais (timezone America/Sao_Paulo): {now_str}
 
 === Memórias sobre o usuário ===
 {summary}
 
 === Histórico recente ===
-{history_text}
+{_format_history(history)}
 
 === Mensagem atual ===
 Usuário: {user_message}
@@ -459,6 +507,36 @@ def _fallback(user_message: str, error: str) -> dict:
     }
 
 
+_MAX_RETRIES_TRANSIENT = 2  # tentativas extras em erros transientes (timeout, 5xx)
+_RETRY_BACKOFF_BASE_S = 1.0
+
+
+async def _call_gemini_with_retry(model, content) -> str:
+    """Chama Gemini com retry para erros transientes. Levanta exceção se exausto."""
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES_TRANSIENT + 1):
+        try:
+            response = await model.generate_content_async(content)
+            return response.text or ""
+        except ResourceExhausted:
+            # 429 não é retried automaticamente — caller decide com base no retry_delay
+            raise
+        except (ServiceUnavailable, RetryError, GoogleAPICallError) as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES_TRANSIENT:
+                wait = _RETRY_BACKOFF_BASE_S * (2 ** attempt)
+                log.warning(
+                    "Gemini transient error (tentativa %d/%d), retry em %.1fs: %s",
+                    attempt + 1, _MAX_RETRIES_TRANSIENT + 1, wait, type(e).__name__,
+                )
+                await asyncio.sleep(wait)
+            else:
+                raise
+    if last_exc:
+        raise last_exc
+    return ""
+
+
 async def classify_and_respond(
     user_message: str,
     image_path: str | None = None,
@@ -469,6 +547,9 @@ async def classify_and_respond(
     Se `image_path` for passado, inclui a imagem no contexto da chamada
     (o prompt já instrui como interpretar fotos de plano de treino).
     """
+    started = time.monotonic()
+    _METRICS["total_calls"] += 1
+
     now = datetime.now()
     prompt = _build_prompt(user_message or "(usuário enviou apenas uma imagem)", now)
 
@@ -486,9 +567,10 @@ async def classify_and_respond(
     try:
         api_content = [prompt, uploaded] if uploaded else prompt
         try:
-            response = await model.generate_content_async(api_content)
-            raw = response.text or ""
+            raw = await _call_gemini_with_retry(model, api_content)
         except ResourceExhausted as e:
+            _METRICS["total_429"] += 1
+            _METRICS["total_errors"] += 1
             retry = _parse_retry_delay(e)
             retry_msg = (
                 f" Tenta de novo em ~{retry}s." if retry else " Tenta de novo daqui a pouco."
@@ -499,24 +581,35 @@ async def classify_and_respond(
                 "reply": f"Atingi o limite de uso da API do Gemini agora.{retry_msg}",
                 "extracted_facts": [],
             }
-        except Exception as e:
+        except Exception:
+            _METRICS["total_errors"] += 1
             log.exception("Erro ao chamar Gemini para classificação")
-            return _fallback(user_message, f"api_error: {e}")
+            return _fallback(user_message, "api_error")
 
         raw = _strip_fences(raw)
         if not raw:
+            _METRICS["total_errors"] += 1
             return _fallback(user_message, "empty_response")
 
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as e:
+            _METRICS["total_errors"] += 1
             log.warning("JSON inválido do modelo: %r", raw[:300])
             return _fallback(user_message, f"json_error: {e}")
 
         if not isinstance(parsed, dict):
+            _METRICS["total_errors"] += 1
             return _fallback(user_message, "not_a_dict")
 
-        return _coerce(parsed, user_message)
+        result = _coerce(parsed, user_message)
+        _METRICS["intent_counts"][result["intent"]] += 1
+        duration_ms = int((time.monotonic() - started) * 1000)
+        log.info(
+            "intent=%s duration_ms=%d image=%s msg_len=%d",
+            result["intent"], duration_ms, bool(image_path), len(user_message or ""),
+        )
+        return result
     finally:
         if uploaded is not None:
             try:

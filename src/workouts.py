@@ -261,11 +261,12 @@ def log_set(
         ).fetchone()
         set_number = (row["max_set"] or 0) + 1
 
-        # PR check: comparar com histórico fora dessa sessão
+        # PR check: max anterior (inclui sets logados antes nessa sessão).
+        # A query roda ANTES do INSERT, então nunca compara consigo mesmo.
         prev_row = conn.execute(
             "SELECT MAX(weight_used) AS prev_max FROM session_logs "
-            "WHERE exercise_name = ? COLLATE NOCASE AND session_id != ?",
-            (exercise_name, session_id),
+            "WHERE exercise_name = ? COLLATE NOCASE",
+            (exercise_name,),
         ).fetchone()
         prev_max = prev_row["prev_max"]
 
