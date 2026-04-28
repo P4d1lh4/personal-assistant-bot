@@ -137,7 +137,7 @@ async def _send_daily_digest() -> None:
     reminders_block, memories_block, workout_block = _collect_digest_data(today)
 
     prompt = (
-        f"Você é o assistente pessoal do Guilherme. Crie uma mensagem curta "
+        f"Você é um assistente pessoal. Crie uma mensagem curta "
         f"(3-6 linhas) de bom dia, em português brasileiro, mencionando os "
         f"compromissos do dia, treino do dia (se houver) e rotinas/metas relevantes. "
         f"Tom natural, direto, próximo. Sem markdown, sem bullets formais.\n\n"
@@ -158,7 +158,7 @@ async def _send_daily_digest() -> None:
 
     if not text:
         text = (
-            f"Bom dia, Guilherme!\n\n"
+            f"Bom dia!\n\n"
             f"Lembretes de hoje:\n{reminders_block}\n\n"
             f"Treino de hoje:\n{workout_block}"
         )

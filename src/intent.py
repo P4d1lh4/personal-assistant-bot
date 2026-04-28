@@ -61,11 +61,11 @@ def _parse_retry_delay(err: Exception) -> int | None:
 VALID_CATEGORIES = {"fact", "preference", "routine", "goal", "habit"}
 
 
-_SYSTEM_PROMPT_TEMPLATE = """Você é o assistente pessoal do Guilherme. Conversa natural em português do Brasil, direta e útil.
+_SYSTEM_PROMPT_TEMPLATE = """Você é um assistente pessoal. Conversa natural em português do Brasil, direta e útil.
 
 Data e hora atuais (timezone America/Sao_Paulo): __NOW__
 
-Sua tarefa é decidir o que fazer com a mensagem do Guilherme e responder em JSON com um dos intents abaixo:
+Sua tarefa é decidir o que fazer com a mensagem do usuário e responder em JSON com um dos intents abaixo:
 
 1. "chat" — quando ele só quer conversar, perguntar algo, opinar.
    Campos: reply (sua resposta natural pra ele).
@@ -207,7 +207,7 @@ Se a mensagem incluir uma FOTO:
 - Se for outro tipo de imagem: use "chat" e descreva brevemente o que viu.
 
 CAMPO EXTRA (em qualquer intent, exceto save_memory): "extracted_facts"
-- Lista de fatos novos sobre o Guilherme que apareceram NESTA mensagem e merecem ser memorizados a longo prazo.
+- Lista de fatos novos sobre o usuário que apareceram NESTA mensagem e merecem ser memorizados a longo prazo.
 - Cada fato é um objeto com chaves "category" (uma de: fact, preference, routine, goal, habit) e "content" (texto curto e claro).
 - Use apenas quando há fato realmente novo e relevante. Não duplique algo já presente nas memórias listadas abaixo.
 - Não inclua perguntas, opiniões momentâneas, saudações ou nada efêmero.
@@ -218,7 +218,7 @@ REGRAS:
 - Responda APENAS com JSON válido, sem markdown, sem texto fora do JSON.
 - Se houver ambiguidade ou faltar info crítica (ex: pediu lembrete mas não disse quando), use intent "chat" e pergunte na reply.
 - Para intents de ação, a "reply" deve ser curta, natural, confirmando o que foi feito.
-- Use as memórias e histórico abaixo para personalizar. Não invente fatos novos sobre o Guilherme.
+- Use as memórias e histórico abaixo para personalizar. Não invente fatos novos sobre o usuário.
 """
 
 
@@ -231,20 +231,20 @@ def _build_prompt(user_message: str, now: datetime) -> str:
     summary = get_memory_summary(limit_per_category=15)
     history = get_recent_history(limit=10)
     history_text = "\n".join(
-        f"{'Guilherme' if h['role'] == 'user' else 'Assistente'}: {h['content']}"
+        f"{'Usuário' if h['role'] == 'user' else 'Assistente'}: {h['content']}"
         for h in history
     ) or "(sem histórico anterior)"
 
     return f"""{_system_prompt(now)}
 
-=== Memórias sobre o Guilherme ===
+=== Memórias sobre o usuário ===
 {summary}
 
 === Histórico recente ===
 {history_text}
 
 === Mensagem atual ===
-Guilherme: {user_message}
+Usuário: {user_message}
 
 Responda APENAS com o JSON:"""
 
