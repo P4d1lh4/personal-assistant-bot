@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from .db import conn_ctx
@@ -314,6 +314,73 @@ def get_session_summary(session_id: int) -> Optional[dict]:
 
 
 # ---------- Histórico ----------
+
+def get_workout_streak() -> int:
+    """Dias consecutivos com pelo menos 1 sessão encerrada, terminando hoje ou ontem.
+
+    Se a última sessão foi anteontem ou antes, considera streak quebrado (retorna 0).
+    """
+    with conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT DATE(started_at) AS day FROM workout_sessions "
+            "WHERE completed_at IS NOT NULL "
+            "ORDER BY DATE(started_at) DESC"
+        ).fetchall()
+    if not rows:
+        return 0
+
+    days = [date.fromisoformat(r["day"]) for r in rows]
+    today = datetime.now().date()
+    if days[0] not in (today, today - timedelta(days=1)):
+        return 0
+
+    streak = 1
+    for i in range(1, len(days)):
+        if days[i] == days[i - 1] - timedelta(days=1):
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def get_workout_stats(days: int = 30) -> dict:
+    """Agrega total, breakdown por treino, frequência semanal e streak."""
+    if days < 1:
+        days = 1
+    today = datetime.now().date()
+    start = today - timedelta(days=days - 1)
+
+    with conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT s.id, s.started_at, s.completed_at, "
+            "COALESCE(w.name, '(sem treino vinculado)') AS workout_name "
+            "FROM workout_sessions s "
+            "LEFT JOIN workouts w ON w.id = s.workout_id "
+            "WHERE s.completed_at IS NOT NULL "
+            "AND DATE(s.started_at) >= ? AND DATE(s.started_at) <= ? "
+            "ORDER BY s.started_at DESC",
+            (start.isoformat(), today.isoformat()),
+        ).fetchall()
+
+    by_workout: dict[str, int] = {}
+    for r in rows:
+        name = r["workout_name"]
+        by_workout[name] = by_workout.get(name, 0) + 1
+
+    weeks = days / 7
+    per_week_avg = round(len(rows) / weeks, 1) if weeks >= 1 else None
+
+    return {
+        "total": len(rows),
+        "days": days,
+        "by_workout": by_workout,
+        "last_session_at": rows[0]["started_at"] if rows else None,
+        "per_week_avg": per_week_avg,
+        "streak": get_workout_streak(),
+        "start_date": start.isoformat(),
+        "end_date": today.isoformat(),
+    }
+
 
 def get_exercise_history(exercise_name: str, limit_sessions: int = 6) -> list[dict]:
     """Retorna histórico recente do exercício agrupado por sessão."""

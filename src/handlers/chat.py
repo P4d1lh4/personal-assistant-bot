@@ -161,6 +161,7 @@ _WORKOUT_INTENTS = {
     "cancel_workout_session",
     "show_exercise_history",
     "start_rest_timer",
+    "workout_stats",
 }
 
 _MEDICATION_INTENTS = {
@@ -484,6 +485,35 @@ async def _dispatch_workout(intent_data: dict) -> str:
             log.exception("Falha ao criar timer de descanso")
             return f"Falhou ao agendar timer: {e}"
         return reply or f"⏱️ Timer de {seconds}s iniciado. Te aviso quando acabar."
+
+    if intent == "workout_stats":
+        days = intent_data.get("days", 30)
+        stats = workouts_service.get_workout_stats(days=days)
+        if stats["total"] == 0:
+            return f"Você não tem treinos completos nos últimos {stats['days']} dias."
+        lines = [
+            f"📊 Treinos — últimos {stats['days']} dias",
+            f"• Total: {stats['total']} sessão(ões)",
+        ]
+        if stats["per_week_avg"] is not None:
+            lines.append(f"• Frequência: ~{stats['per_week_avg']}/semana")
+        if stats["last_session_at"]:
+            last = stats["last_session_at"][:10]
+            lines.append(f"• Última: {last}")
+        if stats["streak"] > 0:
+            label = "dia" if stats["streak"] == 1 else "dias"
+            lines.append(f"🔥 Streak: {stats['streak']} {label} consecutivos")
+        else:
+            lines.append("🔥 Streak: 0 (treine hoje pra começar)")
+        if stats["by_workout"]:
+            lines.append("")
+            lines.append("Por treino:")
+            for name, count in sorted(
+                stats["by_workout"].items(), key=lambda x: -x[1]
+            ):
+                lines.append(f"  • {name}: {count}x")
+        prefix = (reply + "\n\n") if reply else ""
+        return prefix + "\n".join(lines)
 
     return reply or "(sem resposta)"
 

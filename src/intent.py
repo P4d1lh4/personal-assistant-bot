@@ -37,6 +37,7 @@ VALID_INTENTS = {
     "cancel_workout_session",
     "show_exercise_history",
     "start_rest_timer",
+    "workout_stats",
     # Medicações
     "create_medication",
     "list_medications",
@@ -156,6 +157,11 @@ Sua tarefa é decidir o que fazer com a mensagem do usuário e responder em JSON
 21. "start_rest_timer" — quando ele pede um timer de descanso entre séries.
     Exemplos: "descanso de 90s", "timer 2 min", "me avisa daqui 60 segundos".
     Campos: seconds (int, mínimo 10, máximo 600), reply (curta).
+
+21b. "workout_stats" — quando ele pergunta sobre frequência/quantidade de treinos numa janela de tempo.
+    Exemplos: "treinei quantas vezes esse mês?", "minha frequência", "quando treinei pela última vez?", "treinei quantos dias na semana?", "quantos treinos fiz nos últimos 60 dias?".
+    Campos: days (int, default 30), reply (curta — o relatório será adicionado).
+    NÃO use "show_exercise_history" pra isso (esse é por exercício específico, não agregado).
 
 === MEDICAÇÕES ===
 
@@ -398,6 +404,12 @@ def _coerce(parsed: dict, user_message: str) -> dict:
             result["reply"] = reply or "Quantos segundos de descanso? (entre 10 e 600)"
         else:
             result["seconds"] = seconds
+
+    if intent == "workout_stats":
+        days = _coerce_int(parsed.get("days"))
+        if days is None or days < 1:
+            days = 30
+        result["days"] = min(days, 365)
 
     # ---------- Medicações ----------
     if intent == "create_medication":
