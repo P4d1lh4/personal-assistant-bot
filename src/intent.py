@@ -589,6 +589,39 @@ def _fallback(user_message: str, error: str) -> dict:
 _MAX_RETRIES_TRANSIENT = 2  # tentativas extras em erros transientes (timeout, 5xx)
 _RETRY_BACKOFF_BASE_S = 1.0
 
+# Cache de classificação: mensagem repetida em ≤30s reutiliza o JSON parseado.
+# Útil em retries pós-429 e digitações duplicadas. Valores são cópias do dict
+# original sem campos auxiliares (`_reminder_id`, `_reminder_ids`) que vêm do
+# dispatcher e nunca devem ser cachados.
+_CLASSIFY_CACHE: dict[str, tuple[float, dict]] = {}
+_CLASSIFY_CACHE_TTL_S = 30.0
+_CLASSIFY_CACHE_MAX_ENTRIES = 50
+
+
+def _cache_get(key: str) -> dict | None:
+    entry = _CLASSIFY_CACHE.get(key)
+    if entry is None:
+        return None
+    cached_at, data = entry
+    if time.monotonic() - cached_at > _CLASSIFY_CACHE_TTL_S:
+        del _CLASSIFY_CACHE[key]
+        return None
+    # Cópia rasa pra evitar que o caller mute o valor cacheado
+    cloned = dict(data)
+    # `extracted_facts` é lista — copiar pra evitar mutação
+    cloned["extracted_facts"] = list(data.get("extracted_facts") or [])
+    return cloned
+
+
+def _cache_set(key: str, value: dict) -> None:
+    if len(_CLASSIFY_CACHE) >= _CLASSIFY_CACHE_MAX_ENTRIES:
+        # FIFO simples: descarta a entrada mais antiga
+        oldest_key = min(_CLASSIFY_CACHE, key=lambda k: _CLASSIFY_CACHE[k][0])
+        _CLASSIFY_CACHE.pop(oldest_key, None)
+    # Não armazena campos auxiliares de dispatch
+    cleaned = {k: v for k, v in value.items() if not k.startswith("_")}
+    _CLASSIFY_CACHE[key] = (time.monotonic(), cleaned)
+
 
 async def _call_gemini_with_retry(model, content) -> str:
     """Chama Gemini com retry para erros transientes. Levanta exceção se exausto."""
@@ -628,6 +661,15 @@ async def classify_and_respond(
     """
     started = time.monotonic()
     _METRICS["total_calls"] += 1
+
+    # Cache só pra mensagens textuais (imagens não são cacheadas — o file_path é tmp)
+    cache_key = None
+    if not image_path and user_message:
+        cache_key = user_message.strip().lower()
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            log.info("intent=%s via=cache", cached.get("intent"))
+            return cached
 
     now = datetime.now()
     prompt = _build_prompt(user_message or "(usuário enviou apenas uma imagem)", now)
@@ -688,6 +730,8 @@ async def classify_and_respond(
             "intent=%s duration_ms=%d image=%s msg_len=%d",
             result["intent"], duration_ms, bool(image_path), len(user_message or ""),
         )
+        if cache_key is not None:
+            _cache_set(cache_key, result)
         return result
     finally:
         if uploaded is not None:

@@ -8,6 +8,7 @@ from ..memory import (
     list_memories,
 )
 from .auth import owner_only
+from .chat import _dispatch
 
 WELCOME = """Sou seu assistente pessoal.
 
@@ -113,3 +114,36 @@ async def cmd_esquecer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     ok = delete_memory(mid)
     await msg.reply_text(f"Memória {mid} {'removida' if ok else 'não encontrada'}.")
+
+
+# ---------- Slash commands de leitura (sem Gemini) ----------
+
+
+async def _dispatch_intent_to_text(intent: str, **extra) -> str:
+    """Helper: monta intent_data mínimo e roda o dispatcher (zero Gemini)."""
+    intent_data = {"intent": intent, "reply": "", "extracted_facts": [], **extra}
+    return await _dispatch(intent_data)
+
+
+@owner_only
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = await _dispatch_intent_to_text("show_status")
+    await update.effective_message.reply_text(text)
+
+
+@owner_only
+async def cmd_treinos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = await _dispatch_intent_to_text("list_workouts")
+    await update.effective_message.reply_text(text)
+
+
+@owner_only
+async def cmd_remedios(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = await _dispatch_intent_to_text("list_medications")
+    await update.effective_message.reply_text(text)
+
+
+@owner_only
+async def cmd_atividades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = await _dispatch_intent_to_text("list_activities", category=None)
+    await update.effective_message.reply_text(text)

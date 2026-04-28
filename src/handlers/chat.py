@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 from .. import activities as activities_service
 from .. import medications as medications_service
 from .. import reminders as reminders_service
+from .. import shortcuts as shortcuts_module
 from .. import workouts as workouts_service
 from ..intent import classify_and_respond, transcribe_voice
 from ..memory import (
@@ -986,12 +987,21 @@ async def _run_intent_pipeline(
 
     intent_data: dict = {"intent": "chat"}
     final_reply = ""
+
+    # Pre-classifier: tenta resolver SEM Gemini pra economia de tokens.
+    shortcut = None if image_path else shortcuts_module.match(user_text)
+
     async with _typing_indicator(message):
         try:
-            intent_data = await classify_and_respond(
-                user_text, image_path=image_path, image_mime=image_mime
-            )
-            final_reply = await _dispatch(intent_data)
+            if shortcut is not None:
+                intent_data = shortcut
+                log.info("intent=%s via=shortcut", intent_data.get("intent"))
+                final_reply = await _dispatch(intent_data)
+            else:
+                intent_data = await classify_and_respond(
+                    user_text, image_path=image_path, image_mime=image_mime
+                )
+                final_reply = await _dispatch(intent_data)
         except Exception:
             log.exception("Erro ao processar mensagem")
             final_reply = "Tive um problema processando isso. Tenta de novo daqui a pouco."

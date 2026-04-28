@@ -12,12 +12,16 @@ from .config import TELEGRAM_TOKEN
 from .db import init_db
 from .handlers.chat import handle_message, handle_photo, handle_voice
 from .handlers.commands import (
+    cmd_atividades,
     cmd_esquecer,
     cmd_help,
     cmd_lembrar,
     cmd_listar,
+    cmd_remedios,
     cmd_rotina,
     cmd_start,
+    cmd_status,
+    cmd_treinos,
 )
 from .handlers.activities import handle_activity_callback
 from .handlers.inline_buttons import handle_reminder_callback
@@ -66,6 +70,11 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("lembrete", cmd_lembrete))
     app.add_handler(CommandHandler("agenda", cmd_agenda))
     app.add_handler(CommandHandler("cancelar", cmd_cancelar))
+    # Slash de leitura — zero Gemini
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("treinos", cmd_treinos))
+    app.add_handler(CommandHandler("remedios", cmd_remedios))
+    app.add_handler(CommandHandler("atividades", cmd_atividades))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
