@@ -108,6 +108,28 @@ CREATE TABLE IF NOT EXISTS medication_intakes (
 
 CREATE INDEX IF NOT EXISTS idx_medication_intakes_med ON medication_intakes(medication_id);
 CREATE INDEX IF NOT EXISTS idx_medication_intakes_when ON medication_intakes(taken_at);
+
+CREATE TABLE IF NOT EXISTS activities (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    category     TEXT NOT NULL,
+    days_of_week TEXT,
+    active       INTEGER DEFAULT 1,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL,
+    log_date    TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    logged_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(activity_id, log_date),
+    FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_date ON activity_logs(log_date);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_activity ON activity_logs(activity_id);
 """
 
 

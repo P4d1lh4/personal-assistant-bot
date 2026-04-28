@@ -14,6 +14,7 @@ from telegram import (
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
+from .. import activities as activities_service
 from .. import medications as medications_service
 from .. import reminders as reminders_service
 from .. import workouts as workouts_service
@@ -655,6 +656,183 @@ async def _h_show_status(d: dict) -> str:
     return _build_status_panel(d.get("reply", "").strip())
 
 
+# ---------- Atividades ----------
+
+
+def _format_days(days: list[int] | None) -> str:
+    if days is None:
+        return "todo dia"
+    short = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    return "/".join(short[d] for d in sorted(days))
+
+
+def _resolve_activity(name: str | None) -> tuple[dict | None, str | None]:
+    """Resolve atividade por nome, ou infere se houver só 1 ativa."""
+    if name:
+        a = activities_service.get_by_name(name)
+        if a is None:
+            return None, f"Não achei atividade \"{name}\" ativa."
+        return a, None
+    solo = activities_service.find_solo_active()
+    if solo is None:
+        actives = activities_service.list_active()
+        if not actives:
+            return None, "Você não tem atividades cadastradas."
+        names = ", ".join(a["name"] for a in actives)
+        return None, f"Tem mais de uma atividade ativa ({names}). Diz qual."
+    return activities_service.get_by_id(solo["id"]), None
+
+
+async def _h_create_activity(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    name = d["activity_name"]
+    category = d["category"]
+    days = d.get("days_of_week")
+    existing = activities_service.get_by_name(name)
+    if existing:
+        return f"Já tem uma atividade \"{name}\". Apaga antes pra criar outra."
+    try:
+        activities_service.create(name, category, days_of_week=days)
+    except Exception:
+        log.exception("Falha ao criar atividade")
+        return "Não consegui cadastrar a atividade. Tenta de novo."
+    days_label = _format_days(days)
+    return reply or (
+        f"📋 Atividade *{name}* (categoria: {category}, {days_label}) cadastrada. "
+        f"Vou perguntar à noite o que você cumpriu."
+    )
+
+
+async def _h_list_activities(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    category = d.get("category")
+    rows = activities_service.list_active(category=category)
+    if not rows:
+        return (
+            f"Nenhuma atividade na categoria \"{category}\"."
+            if category
+            else "Nenhuma atividade cadastrada."
+        )
+    by_cat: dict[str, list[dict]] = {}
+    for a in rows:
+        by_cat.setdefault(a["category"], []).append(a)
+    lines = [reply] if reply else [f"📋 Suas atividades ({len(rows)}):"]
+    for cat, items in by_cat.items():
+        lines.append(f"\n*{cat}*")
+        for a in items:
+            lines.append(f"  • {a['name']} — {_format_days(a['days_of_week'])}")
+    return "\n".join(lines)
+
+
+async def _h_delete_activity(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    activity, err = _resolve_activity(d.get("activity_name"))
+    if err:
+        return err
+    ok = activities_service.deactivate(activity["id"])
+    return reply or (
+        f"Atividade \"{activity['name']}\" apagada."
+        if ok
+        else "Falhou ao apagar."
+    )
+
+
+async def _h_track_activity(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    activity, err = _resolve_activity(d.get("activity_name"))
+    if err:
+        return err
+    status = d.get("status", "done")
+    try:
+        activities_service.track(activity["id"], status)
+    except Exception:
+        log.exception("Falha ao registrar atividade")
+        return "Falhou ao registrar. Tenta de novo."
+    icon = "✅" if status == "done" else "❌"
+    label = "feito" if status == "done" else "não feito"
+    return reply or f"{icon} {activity['name']}: {label} hoje"
+
+
+async def _h_untrack_activity(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    activity, err = _resolve_activity(d.get("activity_name"))
+    if err:
+        return err
+    ok = activities_service.untrack(activity["id"])
+    if ok:
+        return reply or f"Registro de hoje da atividade \"{activity['name']}\" apagado."
+    return f"Não tinha registro de hoje pra \"{activity['name']}\"."
+
+
+async def _h_activity_compliance(d: dict) -> str:
+    reply = d.get("reply", "").strip()
+    days = d.get("days", 30)
+    category = d.get("category")
+    activity_name = d.get("activity_name")
+
+    # Caso 1: atividade específica
+    if activity_name:
+        activity, err = _resolve_activity(activity_name)
+        if err:
+            return err
+        c = activities_service.compliance(activity["id"], days=days)
+        return _format_compliance_for_activity(activity, c, reply)
+
+    # Caso 2: categoria
+    if category:
+        c = activities_service.category_compliance(category, days=days)
+        if c["expected"] == 0:
+            return f"Nenhuma atividade ativa na categoria \"{category}\"."
+        bar_filled = int(c["percent"] // 10)
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
+        lines = [
+            f"📊 *{category}* — últimos {days} dias",
+            f"{c['done']}/{c['expected']} dias previstos cumpridos ({c['percent']}%)",
+            bar,
+        ]
+        if c["per_activity"]:
+            lines.append("\nPor atividade:")
+            for pa in c["per_activity"]:
+                lines.append(f"  • {pa['name']}: {pa['done']}/{pa['expected']} ({pa['percent']}%)")
+        prefix = (reply + "\n\n") if reply else ""
+        return prefix + "\n".join(lines)
+
+    # Caso 3: nenhum filtro — agregar todas
+    actives = activities_service.list_active()
+    if not actives:
+        return "Você ainda não tem atividades cadastradas."
+    by_cat: dict[str, dict] = {}
+    for a in actives:
+        cat = a["category"]
+        if cat not in by_cat:
+            by_cat[cat] = {"done": 0, "expected": 0}
+        c = activities_service.compliance(a["id"], days=days)
+        by_cat[cat]["done"] += c["done"]
+        by_cat[cat]["expected"] += c["expected"]
+    lines = [f"📊 Adesão — últimos {days} dias"]
+    for cat, totals in by_cat.items():
+        if totals["expected"] == 0:
+            continue
+        pct = round(100 * totals["done"] / totals["expected"], 1)
+        lines.append(f"  • {cat}: {totals['done']}/{totals['expected']} ({pct}%)")
+    prefix = (reply + "\n\n") if reply else ""
+    return prefix + "\n".join(lines)
+
+
+def _format_compliance_for_activity(activity: dict, c: dict, reply: str) -> str:
+    bar_filled = int(c["percent"] // 10)
+    bar = "█" * bar_filled + "░" * (10 - bar_filled)
+    body = (
+        f"📊 *{activity['name']}* ({activity['category']}) — últimos {c['expected']} dias previstos\n"
+        f"{c['done']}/{c['expected']} cumpridos ({c['percent']}%)\n"
+        f"{bar}"
+    )
+    if c["skipped"]:
+        body += f"\nPulados: {c['skipped']}"
+    prefix = (reply + "\n\n") if reply else ""
+    return prefix + body
+
+
 _INTENT_HANDLERS = {
     "chat": _h_chat,
     "create_reminder": _h_create_reminder,
@@ -666,6 +844,12 @@ _INTENT_HANDLERS = {
     "cancel_reminder": _h_cancel_reminder,
     "delete_memory": _h_delete_memory,
     "show_status": _h_show_status,
+    "create_activity": _h_create_activity,
+    "list_activities": _h_list_activities,
+    "delete_activity": _h_delete_activity,
+    "track_activity": _h_track_activity,
+    "untrack_activity": _h_untrack_activity,
+    "activity_compliance": _h_activity_compliance,
 }
 
 
@@ -725,6 +909,21 @@ def _build_status_panel(reply: str) -> str:
                 f"  • {m['name']} — {taken_today} (7d: {comp['taken']}/7)"
             )
         sections.append("\n".join(med_lines))
+
+    # Atividades de hoje
+    activities_today = activities_service.list_due_today()
+    if activities_today:
+        act_lines = ["📋 *Atividades de hoje*"]
+        for a in activities_today:
+            log_today = activities_service.get_log(a["id"])
+            if log_today is None:
+                marker = "⏳ pendente"
+            elif log_today["status"] == "done":
+                marker = "✅ feito"
+            else:
+                marker = "❌ não feito"
+            act_lines.append(f"  • {a['name']} ({a['category']}) — {marker}")
+        sections.append("\n".join(act_lines))
 
     body = "\n\n".join(sections)
     prefix = (reply + "\n\n") if reply else "📋 *Status*\n\n"

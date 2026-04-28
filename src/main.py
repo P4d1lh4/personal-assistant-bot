@@ -19,6 +19,7 @@ from .handlers.commands import (
     cmd_rotina,
     cmd_start,
 )
+from .handlers.activities import handle_activity_callback
 from .handlers.inline_buttons import handle_reminder_callback
 from .handlers.medications import handle_medication_callback
 from .handlers.reminders import cmd_agenda, cmd_cancelar, cmd_lembrete
@@ -75,6 +76,9 @@ def build_app() -> Application:
     )
     app.add_handler(
         CallbackQueryHandler(handle_reminder_callback, pattern=r"^rem_cancel:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_activity_callback, pattern=r"^act_(done|skip):")
     )
 
     return app

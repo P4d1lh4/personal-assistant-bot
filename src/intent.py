@@ -71,6 +71,13 @@ VALID_INTENTS = {
     "track_medication",
     "untrack_medication",
     "medication_compliance",
+    # Atividades diárias
+    "create_activity",
+    "list_activities",
+    "delete_activity",
+    "track_activity",
+    "untrack_activity",
+    "activity_compliance",
 }
 
 _RETRY_DELAY_RE = re.compile(r"retry in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
@@ -236,6 +243,40 @@ REGRA DE DECISÃO clara para evitar confusão com create_recurring_reminder:
 27. "medication_compliance" — quantos dias ele tomou em uma janela.
     Exemplos: "quantos dias tomei sertralina nos últimos 15?", "como tá minha adesão?", "tomei quantos dias dos últimos 7?", "tomei quantos dias esse mês?".
     Campos: medication_name (opcional), days (int, default 30), reply (curta — o resumo será adicionado).
+
+=== ATIVIDADES DIÁRIAS ===
+
+Atividades são tarefas que o usuário quer cumprir todo dia (ou em dias específicos),
+agrupadas por uma CATEGORIA livre (escolhida pelo usuário, ex: "física", "obrigatória",
+"estudo", "trabalho"). Todo dia às 23:30 o bot pergunta o que ele cumpriu via botões.
+
+Diferença vs medications: medications são substâncias com horário específico no dia;
+atividades são compromissos com o dia (sem hora). Diferença vs workouts: workouts é
+treino estruturado com séries/reps; atividade física genérica é "correr 30min".
+
+28. "create_activity" — quando ele quer cadastrar uma atividade diária.
+    Exemplos: "cadastra atividade física: correr todo dia", "adiciona estudo: ler 30min seg/qua/sex", "obrigatória: tomar banho", "atividade física andar 10k passos".
+    Campos: activity_name (descrição curta), category (livre, ex: "física", "estudo", "obrigatória"), days_of_week (lista opcional de int 0-6, omita se for todo dia. 0=segunda, 6=domingo), reply.
+
+29. "list_activities" — quando ele pergunta quais atividades tem cadastradas.
+    Exemplos: "minhas atividades", "o que eu tenho que fazer?", "lista as atividades", "quais minhas atividades físicas?".
+    Campos: category (opcional, se filtrar por uma), reply (curta — a lista será adicionada).
+
+30. "delete_activity" — apagar/parar de rastrear uma atividade.
+    Exemplos: "tira a atividade correr", "para de monitorar leitura", "apaga a atividade X".
+    Campos: activity_name, reply.
+
+31. "track_activity" — registrar manualmente que fez (ou não fez) uma atividade.
+    Exemplos: "fiz minha corrida hoje", "fiz a leitura", "não fiz a corrida hoje", "pulei a meditação".
+    Campos: activity_name (opcional — se omitido e só houver 1 atividade ativa, infere; senão peça o nome), status ("done" se fez, "skipped" se não fez), reply.
+
+32. "untrack_activity" — desfazer o registro de hoje.
+    Exemplos: "desfaz, errei", "tira o registro de hoje", "esquece, não foi".
+    Campos: activity_name (opcional), reply.
+
+33. "activity_compliance" — quantos dias cumpriu uma atividade ou categoria.
+    Exemplos: "como tô na adesão das físicas?", "fiz quantos dias de leitura nos últimos 7?", "minhas atividades obrigatórias", "como tá minha rotina física esse mês?".
+    Campos: activity_name (opcional, se for 1 atividade), category (opcional, se for por categoria), days (int, default 30), reply (curta — o resumo será adicionado).
 
 === CONTEXTO DE IMAGEM ===
 
@@ -474,6 +515,44 @@ def _coerce(parsed: dict, user_message: str) -> dict:
 
     if intent == "medication_compliance":
         result["medication_name"] = (parsed.get("medication_name") or "").strip() or None
+        days = _coerce_int(parsed.get("days"))
+        if days is None or days < 1:
+            days = 30
+        result["days"] = min(days, 365)
+
+    # ---------- Atividades ----------
+    if intent == "create_activity":
+        result["activity_name"] = (parsed.get("activity_name") or "").strip()
+        result["category"] = (parsed.get("category") or "").strip()
+        raw_days = parsed.get("days_of_week")
+        days_list = []
+        if isinstance(raw_days, list):
+            for d in raw_days:
+                v = _coerce_int(d)
+                if v is not None and 0 <= v <= 6:
+                    days_list.append(v)
+        result["days_of_week"] = sorted(set(days_list)) or None
+        if not result["activity_name"] or not result["category"]:
+            result["intent"] = "chat"
+            result["reply"] = (
+                reply or "Faltou o nome da atividade ou a categoria. Pode repetir?"
+            )
+
+    if intent in {"delete_activity", "track_activity", "untrack_activity"}:
+        result["activity_name"] = (parsed.get("activity_name") or "").strip() or None
+
+    if intent == "track_activity":
+        status = (parsed.get("status") or "").strip().lower()
+        if status not in {"done", "skipped"}:
+            status = "done"  # default
+        result["status"] = status
+
+    if intent == "list_activities":
+        result["category"] = (parsed.get("category") or "").strip() or None
+
+    if intent == "activity_compliance":
+        result["activity_name"] = (parsed.get("activity_name") or "").strip() or None
+        result["category"] = (parsed.get("category") or "").strip() or None
         days = _coerce_int(parsed.get("days"))
         if days is None or days < 1:
             days = 30

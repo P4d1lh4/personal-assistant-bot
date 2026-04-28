@@ -37,3 +37,7 @@ def _int_env(name: str, default: int, low: int, high: int) -> int:
 
 
 DAILY_DIGEST_HOUR = _int_env("DAILY_DIGEST_HOUR", 7, 0, 23)
+
+# Hora e minuto do check noturno de atividades (default 23:30)
+ACTIVITY_CHECK_HOUR = _int_env("ACTIVITY_CHECK_HOUR", 23, 0, 23)
+ACTIVITY_CHECK_MINUTE = _int_env("ACTIVITY_CHECK_MINUTE", 30, 0, 59)

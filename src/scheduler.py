@@ -9,7 +9,13 @@ from apscheduler.triggers.date import DateTrigger
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
 
-from .config import DAILY_DIGEST_HOUR, GEMINI_MODEL, OWNER_CHAT_ID
+from .config import (
+    ACTIVITY_CHECK_HOUR,
+    ACTIVITY_CHECK_MINUTE,
+    DAILY_DIGEST_HOUR,
+    GEMINI_MODEL,
+    OWNER_CHAT_ID,
+)
 from .db import conn_ctx
 
 log = logging.getLogger(__name__)
@@ -47,6 +53,20 @@ def _register_maintenance_jobs() -> None:
     log.info(
         "Resumo diário agendado para %02d:00 (America/Sao_Paulo).", DAILY_DIGEST_HOUR
     )
+    sched.add_job(
+        _send_activity_checkup,
+        trigger=CronTrigger(
+            hour=ACTIVITY_CHECK_HOUR,
+            minute=ACTIVITY_CHECK_MINUTE,
+            timezone="America/Sao_Paulo",
+        ),
+        id="maint_activity_checkup",
+        replace_existing=True,
+    )
+    log.info(
+        "Check de atividades agendado para %02d:%02d (America/Sao_Paulo).",
+        ACTIVITY_CHECK_HOUR, ACTIVITY_CHECK_MINUTE,
+    )
 
 
 def _cleanup_old_conversations(retention_days: int = 30) -> int:
@@ -66,7 +86,7 @@ def _cleanup_old_conversations(retention_days: int = 30) -> int:
 _WEEKDAY_PT = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
 
 
-def _collect_digest_data(today: datetime) -> tuple[str, str, str]:
+def _collect_digest_data(today: datetime) -> tuple[str, str, str, str]:
     today_str = today.date().isoformat()
     today_idx = today.weekday()
     with conn_ctx() as conn:
@@ -124,7 +144,15 @@ def _collect_digest_data(today: datetime) -> tuple[str, str, str]:
             "\n".join(ex_lines) or "(sem exercícios cadastrados)"
         )
 
-    return reminders_block, memories_block, workout_block
+    # Atividades de hoje — import lazy pra evitar custo no caminho normal.
+    from . import activities as activities_service
+    due = activities_service.list_due_today()
+    if not due:
+        activities_block = "(sem atividades hoje)"
+    else:
+        activities_block = "\n".join(f"- [{a['category']}] {a['name']}" for a in due)
+
+    return reminders_block, memories_block, workout_block, activities_block
 
 
 async def _send_daily_digest() -> None:
@@ -134,16 +162,23 @@ async def _send_daily_digest() -> None:
 
     today = datetime.now()
     weekday_pt = _WEEKDAY_PT[today.weekday()]
-    reminders_block, memories_block, workout_block = _collect_digest_data(today)
+    (
+        reminders_block,
+        memories_block,
+        workout_block,
+        activities_block,
+    ) = _collect_digest_data(today)
 
     prompt = (
         f"Você é um assistente pessoal. Crie uma mensagem curta "
         f"(3-6 linhas) de bom dia, em português brasileiro, mencionando os "
-        f"compromissos do dia, treino do dia (se houver) e rotinas/metas relevantes. "
-        f"Tom natural, direto, próximo. Sem markdown, sem bullets formais.\n\n"
+        f"compromissos do dia, treino do dia (se houver), atividades previstas "
+        f"e rotinas/metas relevantes. Tom natural, direto, próximo. Sem markdown, "
+        f"sem bullets formais.\n\n"
         f"Hoje é {today.date().isoformat()} ({weekday_pt}).\n\n"
         f"Lembretes de hoje:\n{reminders_block}\n\n"
         f"Treino de hoje:\n{workout_block}\n\n"
+        f"Atividades de hoje:\n{activities_block}\n\n"
         f"Rotinas e metas:\n{memories_block}\n\n"
         f"Mensagem:"
     )
@@ -160,7 +195,8 @@ async def _send_daily_digest() -> None:
         text = (
             f"Bom dia!\n\n"
             f"Lembretes de hoje:\n{reminders_block}\n\n"
-            f"Treino de hoje:\n{workout_block}"
+            f"Treino de hoje:\n{workout_block}\n\n"
+            f"Atividades de hoje:\n{activities_block}"
         )
 
     try:
@@ -168,6 +204,71 @@ async def _send_daily_digest() -> None:
         log.info("Resumo diário enviado.")
     except Exception:
         log.exception("Falha ao enviar resumo diário")
+
+
+async def _send_activity_checkup() -> None:
+    """Pergunta ao usuário, à noite, sobre as atividades pendentes do dia.
+
+    Para cada atividade prevista no dia que ainda não foi marcada como done/skipped,
+    manda uma mensagem com botões inline 'Fiz ✅ / Não fiz ❌'.
+    """
+    if _app is None:
+        log.error("App não inicializado, pulei check de atividades.")
+        return
+
+    # Import lazy pra evitar ciclo (activities.py é simples mas ainda assim).
+    from . import activities as activities_service
+
+    today = datetime.now().date()
+    today_iso = today.isoformat()
+    today_compact = today.strftime("%Y%m%d")
+    due = activities_service.list_due_today()
+    if not due:
+        # Nenhuma atividade prevista hoje — mensagem opcional curta.
+        try:
+            await _app.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text="🌙 Sem atividades previstas pra hoje. Bom descanso.",
+            )
+        except Exception:
+            log.exception("Falha ao enviar mensagem 'sem atividades'")
+        return
+
+    pending = [a for a in due if activities_service.get_log(a["id"]) is None]
+    if not pending:
+        try:
+            await _app.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text="✅ Tudo certo por hoje, todas as atividades já foram registradas.",
+            )
+        except Exception:
+            log.exception("Falha ao enviar mensagem 'tudo certo'")
+        return
+
+    # Cabeçalho + uma mensagem com botões por atividade pendente
+    try:
+        await _app.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=(
+                f"🌙 Check de hoje ({today_iso}) — {len(pending)} atividade(s) pendente(s):"
+            ),
+        )
+    except Exception:
+        log.exception("Falha ao enviar cabeçalho do check noturno")
+
+    for a in pending:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Fiz ✅", callback_data=f"act_done:{a['id']}:{today_compact}"),
+            InlineKeyboardButton("Não fiz ❌", callback_data=f"act_skip:{a['id']}:{today_compact}"),
+        ]])
+        try:
+            await _app.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=f"📋 *{a['name']}* ({a['category']})",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            log.exception("Falha ao enviar prompt da atividade %s", a["id"])
 
 
 def get_scheduler() -> AsyncIOScheduler:
